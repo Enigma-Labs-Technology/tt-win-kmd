@@ -40,12 +40,12 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 
 | nr | Linux name | Win CTL_CODE | Struct (size B: in/out/total) | Method | Status mapping notes | Parity |
 |---|---|---|---|---|---|---|
-| 0 | GET_DEVICE_INFO | `0x80FA2000` | `tenstorrent_get_device_info` (4/20/24) | BUFFERED | baseline | not-started |
-| 1 | GET_HARVESTING | `0x80FA2004` | undocumented in ioctl.h — struct absent; Linux handler behavior to be confirmed from analysis §04 | BUFFERED | baseline | not-started |
-| 2 | QUERY_MAPPINGS | `0x80FA2008` | `tenstorrent_query_mappings` (8/N×24/8+flex) | BUFFERED | baseline; out is flexible array of `tenstorrent_mapping` (24 B each) | not-started |
+| 0 | GET_DEVICE_INFO | `0x80FA2000` | `tenstorrent_get_device_info` (4/20/24) | BUFFERED | baseline | **tested** (M1, ttinfo vs ttsim) |
+| 1 | GET_HARVESTING | `0x80FA2004` | no struct; Linux has NO handler — falls to default -EINVAL (chardev.c:631-632, 694-696) | BUFFERED | -EINVAL → STATUS_INVALID_PARAMETER | **tested** (stub parity asserted by ttinfo) |
+| 2 | QUERY_MAPPINGS | `0x80FA2008` | `tenstorrent_query_mappings` (8/N×24/8+flex) | BUFFERED | packed UC/WC pairs for existing BARs; min(count,valid) copied + zero-fill (memory.c:393-406) | **tested** (M1, incl. count 0/2/6/16) |
 | 3 | ALLOCATE_DMA_BUF | `0x80FA200C` | `tenstorrent_allocate_dma_buf` (24/40/64) | BUFFERED | baseline | not-started |
 | 4 | FREE_DMA_BUF | `0x80FA2010` | `tenstorrent_free_dma_buf` (0/0/0 — GNU empty struct, illegal in MSVC; Windows defines NO struct, zero-length buffers) | BUFFERED | semantics from analysis §04 (likely -EINVAL/unsupported upstream) | not-started |
-| 5 | GET_DRIVER_INFO | `0x80FA2014` | `tenstorrent_get_driver_info` (4/12/16) | BUFFERED | baseline | not-started |
+| 5 | GET_DRIVER_INFO | `0x80FA2014` | `tenstorrent_get_driver_info` (4/12/16) | BUFFERED | baseline | **tested** (M1) |
 | 6 | RESET_DEVICE | `0x80FA2018` | `tenstorrent_reset_device` (8/8/16) | BUFFERED | -EBUSY while TLB dmabuf export live → STATUS_DEVICE_BUSY | not-started |
 | 7 | PIN_PAGES | `0x80FA201C` | `tenstorrent_pin_pages` (24/8/32); extended out `tenstorrent_pin_pages_out_extended` (16) via output_size_bytes | BUFFERED | baseline; user VA probed via MmProbeAndLockPages | not-started |
 | 8 | LOCK_CTL | `0x80FA2020` | `tenstorrent_lock_ctl` (12/4/16) | BUFFERED | ACQUIRE_BLOCKING pends the IRP; cancel → STATUS_CANCELLED (mirrors -EINTR) | not-started |
