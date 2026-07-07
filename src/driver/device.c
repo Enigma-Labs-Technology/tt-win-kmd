@@ -6,6 +6,7 @@
 
 #include <initguid.h>
 #include "ttkmd_ioctl.h"
+#include "ttkmd_abi_check.h"
 
 _Use_decl_annotations_
 NTSTATUS

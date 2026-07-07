@@ -71,6 +71,7 @@
     <ClInclude Include="ttkmd.h" />
     <ClInclude Include="trace.h" />
     <ClInclude Include="..\include\ttkmd_ioctl.h" />
+    <ClInclude Include="..\include\ttkmd_abi_check.h" />
   </ItemGroup>
   <ItemGroup>
     <Inf Include="ttkmd.inf" />
