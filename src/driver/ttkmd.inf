@@ -1,0 +1,85 @@
+;
+; ttkmd.inf — Tenstorrent AI accelerator KMDF driver (Windows port of tt-kmd)
+; Maps to: tt-kmd/module.c pci_device_id table (module.c:64-71, enumerate.h:15-18)
+;          + udev-50-tenstorrent.rules (device node access policy; see OQ-2)
+;
+; Hardware IDs: PCI\VEN_1E52 = Tenstorrent. Blackhole DEV_B140, Wormhole DEV_401E.
+; Grayskull (DEV_FACA) is deliberately omitted: upstream tt-kmd binds it but fails
+; probe with -ENODEV (dropped support); binding a dead ID on Windows would only
+; block diagnostics tooling. See docs/analysis/open-questions-raw.md.
+; ROOT\TTKMD_SOFT is the hardware-free load-test devnode used by M0 acceptance.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = TenstorrentAccelerator
+ClassGuid   = {17db3097-300a-4168-8a1d-6c26bba9263f}
+Provider    = %ManufacturerName%
+CatalogFile = ttkmd.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+ttkmd.sys = 1,,
+
+; ---------------- Custom device setup class (DD-2) ----------------
+[ClassInstall32]
+AddReg = TtClassReg
+
+[TtClassReg]
+HKR,,,0,%ClassName%
+HKR,,Icon,,-10
+; OQ-2: SYSTEM/Admins full control, interactive users read/write.
+; Linux ships MODE 0666 via udev; deliberately tightened here.
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+
+[Manufacturer]
+%ManufacturerName% = Tenstorrent,NT$ARCH$.10.0...22000
+
+[Tenstorrent.NT$ARCH$.10.0...22000]
+%TtBlackhole.DeviceDesc% = TtDevice_Install, PCI\VEN_1E52&DEV_B140
+%TtWormhole.DeviceDesc%  = TtDevice_Install, PCI\VEN_1E52&DEV_401E
+%TtSoft.DeviceDesc%      = TtDevice_Install, ROOT\TTKMD_SOFT
+
+[TtDevice_Install.NT]
+CopyFiles = TtDriverCopy
+
+[TtDriverCopy]
+ttkmd.sys
+
+[TtDevice_Install.NT.HW]
+AddReg = TtDeviceHwReg
+
+[TtDeviceHwReg]
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+
+[TtDevice_Install.NT.Services]
+AddService = ttkmd, %SPSVCINST_ASSOCSERVICE%, TtService_Install
+
+[TtService_Install]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1 ; SERVICE_KERNEL_DRIVER
+StartType     = 3 ; SERVICE_DEMAND_START
+ErrorControl  = 1 ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\ttkmd.sys
+
+[TtDevice_Install.NT.Wdf]
+KmdfService = ttkmd, TtWdfSect
+
+[TtWdfSect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName       = "Tenstorrent (community Windows port)"
+ClassName              = "Tenstorrent accelerators"
+DiskName               = "Tenstorrent ttkmd Installation Disk"
+TtBlackhole.DeviceDesc = "Tenstorrent Blackhole AI Accelerator"
+TtWormhole.DeviceDesc  = "Tenstorrent Wormhole AI Accelerator"
+TtSoft.DeviceDesc      = "Tenstorrent ttkmd Test Soft Device"
+ServiceDesc            = "Tenstorrent kernel-mode driver"

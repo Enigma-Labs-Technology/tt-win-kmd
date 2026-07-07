@@ -5,27 +5,43 @@ here with its rationale. Format: **DD-N** (decision), context, decision, consequ
 
 ---
 
-## DD-1: Installed WDK + VS2022 instead of EWDK
+## DD-1: EWDK 26100.6584 (amended 2026-07-06)
 
-**Context:** The spec's acceptance criteria say "EWDK build clean." The development
-host already has WDK 10.0.22621.0 (build targets + KMDF 1.33 headers), WDK 10.0.26100.0
-headers (no build targets), VS2022 Community (MSVC 14.44), and the full signing
-toolchain (stampinf, Inf2Cat, signtool). No EWDK ISO is present.
+**Context:** The spec's acceptance criteria say "EWDK build clean." First plan was
+the installed WDK 10.0.22621.0 + VS2022 Community MSBuild — but the WDK VSIX that
+provides the `WindowsKernelModeDriver10.0` toolset failed to install: the 22621 VSIX
+is older than VS 17.14 accepts ("install the extension from Visual Studio Installer
+instead", VSIXInstaller exit 9), and both the VS Installer route and a WDK 26100
+install require UAC elevation (not autonomous-safe).
 
-**Decision:** Build with the installed WDK 10.0.22621.0 + VS2022 MSBuild rather than
-downloading a ~15 GB EWDK ISO. `build.ps1` pins `WindowsTargetPlatformVersion=10.0.22621.0`
-(the only WDK version with `WindowsDriver.*.targets` present). The build entry point is
-identical in shape to an EWDK build (`MSBuild.exe` + `WindowsKernelModeDriver10.0`
-toolset), so switching to an EWDK later is a path change, not a design change.
+**Decision (amended):** Use the **EWDK 26100.6584** ("Windows 11 25H2 EWDK with
+VS BuildTools 17.14.0", fwlink 2335681), downloaded to `C:\EWDK\ewdk_26100.6584.iso`
+(20 GB). `build.ps1` mounts the ISO on demand (`Mount-DiskImage`, no elevation) and
+runs its `BuildEnv\SetupBuildEnv.cmd` + MSBuild. Fully self-contained; matches the
+spec's stated default and the Win11 24H2 (26100) test-guest OS.
 
-**Consequences:** KMDF target version is 1.33 (ships with 10.0.22621). Target OS
-Windows 11 21H2+ / Server 2022+, consistent with the spec.
+**Consequences:** WDK 10.0.26100.0, KMDF **1.35**, MSVC 14.44 BuildTools. Findings
+baked into the build:
+- Driver vcxproj needs explicit `<FilesToPackage Include="$(TargetPath)"/>` (template
+  projects carry it; hand-written ones must add it) or Inf2Cat fails with 22.9.1.
+- signtool in this kit requires `/fd`; set via `DriverSign.FileDigestAlgorithm=sha256`.
+- `CodeAnalysisRuleSet` must be an absolute path
+  (`$(WDKContentRoot)CodeAnalysis\DriverRecommendedRules.ruleset`); bare names fail in
+  the report step.
+- **SDV is absent from WDK 26100** (Microsoft removed/deprecated Static Driver
+  Verifier in 24H2-era kits; `Tools\sdv` does not exist). The spec's "SDV where
+  applicable" resolves to: not applicable with this kit — compensated by
+  DriverRecommendedRules Code Analysis on every `-Test` build and (planned) CodeQL
+  with the windows-drivers query suites.
 
 ## DD-2: Driver naming and identity
 
 - Binary/service name: `ttkmd.sys` / `ttkmd` (parallels Linux module name `tenstorrent`).
 - Repo name `tt-win-kmd` to avoid confusion with the upstream `tt-kmd` checkout it is
   diffed against.
+- Grayskull (`DEV_FACA`) is omitted from the INF: upstream binds it but
+  unconditionally fails probe with -ENODEV (dropped support); binding a dead ID on
+  Windows would only block diagnostic tooling. Revisit if upstream re-adds support.
 - Custom device setup class **"TenstorrentAccelerator"**,
   ClassGuid `{17db3097-300a-4168-8a1d-6c26bba9263f}` (generated for this project).
   Rationale: tt-kmd devices are compute accelerators exposed as char devices; the
