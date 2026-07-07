@@ -39,16 +39,22 @@ TtEvtDeviceAdd(
 
     WdfDeviceInitSetIoType(DeviceInit, WdfDeviceIoBuffered);
 
+    // MAP/UNMAP/PIN/UNPIN need the calling process context (DD-8).
+    WdfDeviceInitSetIoInCallerContextCallback(DeviceInit,
+                                              TtEvtIoInCallerContext);
+
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpCallbacks);
     pnpCallbacks.EvtDevicePrepareHardware = TtEvtDevicePrepareHardware;
     pnpCallbacks.EvtDeviceReleaseHardware = TtEvtDeviceReleaseHardware;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpCallbacks);
 
-    // Per-handle context with reset-generation latch (chardev.c open parity).
+    // Per-handle context: reset-generation latch (chardev.c open parity) and
+    // memory state torn down in Cleanup (IRP_MJ_CLEANUP runs in the closing
+    // process, where user unmaps are legal).
     WDF_FILEOBJECT_CONFIG_INIT(&fileConfig,
                                TtEvtDeviceFileCreate,
                                WDF_NO_EVENT_CALLBACK,
-                               WDF_NO_EVENT_CALLBACK);
+                               TtEvtFileCleanup);
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, TT_FILE_CONTEXT);
     WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, &attributes);
 
@@ -73,6 +79,14 @@ TtEvtDeviceAdd(
         return status;
     }
     status = WdfWaitLockCreate(&attributes, &context->ArcMsgLock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    status = WdfWaitLockCreate(&attributes, &context->TlbLock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    status = WdfWaitLockCreate(&attributes, &context->IatuLock);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -122,14 +136,29 @@ TtEvtDeviceFileCreate(
 {
     PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
     PTT_FILE_CONTEXT fileContext = TtGetFileContext(FileObject);
+    NTSTATUS status;
 
     // Latch the reset generation (chardev.c:812 parity). Linux open() does not
     // check detached (analysis §03 open question) — a create during removal
     // succeeds and every subsequent operation fails; we mirror that.
     fileContext->OpenResetGen = ReadAcquire64(&context->ResetGen);
 
-    TraceLoggingWrite(g_TtTraceProvider, "FileCreate");
-    WdfRequestComplete(Request, STATUS_SUCCESS);
+    status = TtFileContextInitMemory(FileObject);
+
+    TraceLoggingWrite(g_TtTraceProvider, "FileCreate",
+                      TraceLoggingNTStatus(status, "status"));
+    WdfRequestComplete(Request, status);
+}
+
+_Use_decl_annotations_
+VOID
+TtEvtFileCleanup(
+    WDFFILEOBJECT FileObject
+    )
+{
+    WDFDEVICE device = WdfFileObjectGetDevice(FileObject);
+
+    TtMemoryFileCleanup(TtGetDeviceContext(device), FileObject);
 }
 
 // PCI segment (GET_DEVICE_INFO pci_domain parity). Multi-segment systems are
@@ -381,6 +410,32 @@ TtEvtDevicePrepareHardware(
         if (!NT_SUCCESS(status)) {
             TtUnmapBlackholeBars(context);
             return status;
+        }
+
+        // TLB pool init (blackhole_init parity): 4G count clamped by BAR4
+        // length; kernel window 201 claimed for the driver.
+        RtlZeroMemory(context->TlbUsed, sizeof(context->TlbUsed));
+        RtlZeroMemory(context->TlbOwner, sizeof(context->TlbOwner));
+        context->Tlb4gCount = (UINT32)min(context->BarLength[4] >> 32,
+                                          (UINT64)TT_TLB_4G_MAX);
+        context->TlbUsed[TT_BH_KERNEL_TLB_INDEX] = TRUE;
+
+        // DMA enabler for coherent buffers (dma_set_mask(58) parity via the
+        // 64-bit S/G profile; common buffers only in M3).
+        if (context->DmaEnabler == NULL) {
+            WDF_DMA_ENABLER_CONFIG dmaConfig;
+
+            WDF_DMA_ENABLER_CONFIG_INIT(&dmaConfig,
+                                        WdfDmaProfileScatterGather64,
+                                        TT_MAX_DMA_BUF_SIZE);
+            status = WdfDmaEnablerCreate(Device, &dmaConfig,
+                                         WDF_NO_OBJECT_ATTRIBUTES,
+                                         &context->DmaEnabler);
+            if (!NT_SUCCESS(status)) {
+                TraceLoggingWrite(g_TtTraceProvider, "DmaEnablerCreateFailed",
+                                  TraceLoggingNTStatus(status, "status"));
+                context->DmaEnabler = NULL;   // !dma_capable path (-EINVAL)
+            }
         }
 
         // Telemetry probe is non-fatal, like Linux blackhole_init_hardware:

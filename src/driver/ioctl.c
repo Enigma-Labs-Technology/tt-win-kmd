@@ -32,13 +32,14 @@ TtIoctlNr(
 // Protocol 3a completion (chardev.c:151-157 parity): zero-fill the entire
 // declared output area, copy min(declared, sizeof(out)) bytes of payload,
 // report Information = outOffset + declared so the zero-fill reaches the user.
-static NTSTATUS
-TtCompleteSizedOut(
-    _In_ WDFREQUEST Request,
-    _In_ size_t OutOffset,
-    _In_reads_bytes_(OutSize) const VOID *Out,
-    _In_ size_t OutSize,
-    _In_ UINT32 Declared
+_Use_decl_annotations_
+NTSTATUS
+TtCompleteSizedOutBuffer(
+    WDFREQUEST Request,
+    size_t OutOffset,
+    const VOID *Out,
+    size_t OutSize,
+    UINT32 Declared
     )
 {
     PUCHAR buffer;
@@ -62,11 +63,12 @@ TtCompleteSizedOut(
 
 // Fixed-size input retrieval: Linux copy_from_user(sizeof(in)) parity; a
 // shorter input buffer is the -EFAULT case.
-static NTSTATUS
-TtCopyIn(
-    _In_ WDFREQUEST Request,
-    _Out_writes_bytes_(InSize) VOID *In,
-    _In_ size_t InSize
+_Use_decl_annotations_
+NTSTATUS
+TtCopyInBuffer(
+    WDFREQUEST Request,
+    VOID *In,
+    size_t InSize
     )
 {
     PVOID buffer;
@@ -92,7 +94,7 @@ TtIoctlGetDeviceInfo(
     struct tenstorrent_get_device_info_out out;
     NTSTATUS status;
 
-    status = TtCopyIn(Request, &in, sizeof(in));
+    status = TtCopyInBuffer(Request, &in, sizeof(in));
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -107,7 +109,7 @@ TtIoctlGetDeviceInfo(
     out.max_dma_buf_size_log2 = 28;               // MAX_DMA_BUF_SIZE_LOG2, memory.h:10
     out.pci_domain = Context->PciDomain;
 
-    return TtCompleteSizedOut(Request,
+    return TtCompleteSizedOutBuffer(Request,
                               offsetof(struct tenstorrent_get_device_info, out),
                               &out, sizeof(out), in.output_size_bytes);
 }
@@ -121,7 +123,7 @@ TtIoctlGetDriverInfo(
     struct tenstorrent_get_driver_info_out out;
     NTSTATUS status;
 
-    status = TtCopyIn(Request, &in, sizeof(in));
+    status = TtCopyInBuffer(Request, &in, sizeof(in));
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -133,7 +135,7 @@ TtIoctlGetDriverInfo(
     out.driver_version_minor = TT_VERSION_MINOR;
     out.driver_version_patch = TT_VERSION_PATCH;
 
-    return TtCompleteSizedOut(Request,
+    return TtCompleteSizedOutBuffer(Request,
                               offsetof(struct tenstorrent_get_driver_info, out),
                               &out, sizeof(out), in.output_size_bytes);
 }
@@ -165,7 +167,7 @@ TtIoctlQueryMappings(
     ULONG i;
     NTSTATUS status;
 
-    status = TtCopyIn(Request, &in, sizeof(in));
+    status = TtCopyInBuffer(Request, &in, sizeof(in));
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -218,6 +220,35 @@ TtIoctlQueryMappings(
     return STATUS_SUCCESS;
 }
 
+// Gate order per tt_cdev_ioctl (chardev.c:591-624, analysis §04.2). Nr of
+// MAXUINT32 marks mmap-path callers (MAP/UNMAP): Linux mmap checks detached
+// and reset_gen but NOT needs_hw_init (documented asymmetry, analysis §11).
+// The reset rwsem lands with RESET_DEVICE (M4).
+_Use_decl_annotations_
+NTSTATUS
+TtCheckIoGates(
+    PTT_DEVICE_CONTEXT Context,
+    WDFFILEOBJECT FileObject,
+    UINT32 Nr
+    )
+{
+    if (Context->Detached) {
+        return STATUS_DEVICE_REMOVED;                 // -ENODEV
+    }
+    if (FileObject != NULL &&
+        TtGetFileContext(FileObject)->OpenResetGen !=
+            ReadAcquire64(&Context->ResetGen)) {
+        return STATUS_DEVICE_REMOVED;                 // -ENODEV
+    }
+    if (Context->NeedsHwInit && Nr != MAXUINT32 &&
+        Nr != 0 && Nr != 5 && Nr != 6) {
+        // Post-reset window: only GET_DEVICE_INFO, GET_DRIVER_INFO,
+        // RESET_DEVICE are allowed (chardev.c:616-624).
+        return STATUS_DEVICE_REMOVED;                 // -ENODEV
+    }
+    return STATUS_SUCCESS;
+}
+
 #ifdef TT_DEBUG_INTERFACES
 // Debug surface (ttkmd_debug.h): thin wrappers over the M2 Blackhole layer.
 // Fixed-size in/out, no size negotiation (protocol 3d style).
@@ -238,7 +269,7 @@ TtIoctlDebugReadTelemetry(
         return STATUS_NOT_SUPPORTED;
     }
 
-    status = TtCopyIn(Request, &arg, sizeof(arg));
+    status = TtCopyInBuffer(Request, &arg, sizeof(arg));
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -278,7 +309,7 @@ TtIoctlDebugArcMsg(
         return STATUS_NOT_SUPPORTED;
     }
 
-    status = TtCopyIn(Request, &arg, sizeof(arg));
+    status = TtCopyInBuffer(Request, &arg, sizeof(arg));
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -323,22 +354,8 @@ TtEvtIoDeviceControl(
     TraceLoggingWrite(g_TtTraceProvider, "IoctlEntry",
                       TraceLoggingUInt32(nr, "nr"));
 
-    // Gate order per tt_cdev_ioctl (chardev.c:591-624, analysis §04.2).
-    // Reset rwsem lands with RESET_DEVICE (M4); every gate below is live now.
-    if (context->Detached) {
-        status = STATUS_DEVICE_REMOVED;               // -ENODEV
-        goto complete;
-    }
-    if (fileObject != NULL &&
-        TtGetFileContext(fileObject)->OpenResetGen !=
-            ReadAcquire64(&context->ResetGen)) {
-        status = STATUS_DEVICE_REMOVED;               // -ENODEV
-        goto complete;
-    }
-    if (context->NeedsHwInit && nr != 0 && nr != 5 && nr != 6) {
-        // Post-reset window: only GET_DEVICE_INFO, GET_DRIVER_INFO,
-        // RESET_DEVICE are allowed (chardev.c:616-624).
-        status = STATUS_DEVICE_REMOVED;               // -ENODEV
+    status = TtCheckIoGates(context, fileObject, nr);
+    if (!NT_SUCCESS(status)) {
         goto complete;
     }
 
@@ -360,8 +377,20 @@ TtEvtIoDeviceControl(
     case 2:
         status = TtIoctlQueryMappings(context, Request);
         break;
+    case 3:
+        status = TtIoctlAllocateDmaBuf(context, fileObject, Request);
+        break;
     case 5:
         status = TtIoctlGetDriverInfo(Request);
+        break;
+    case 11:
+        status = TtIoctlAllocateTlb(context, fileObject, Request);
+        break;
+    case 12:
+        status = TtIoctlFreeTlb(context, fileObject, Request);
+        break;
+    case 13:
+        status = TtIoctlConfigureTlb(context, fileObject, Request);
         break;
     default:
         // Linux: unhandled commands (incl. GET_HARVESTING, FREE_DMA_BUF and
@@ -375,4 +404,66 @@ complete:
                       TraceLoggingUInt32(nr, "nr"),
                       TraceLoggingNTStatus(status, "status"));
     WdfRequestComplete(Request, status);
+}
+
+// MAP/UNMAP/PIN_PAGES/UNPIN_PAGES must run in the calling process context
+// (MmMapLockedPagesSpecifyCache / MmProbeAndLockPages act on the current
+// process); KMDF queues do not guarantee that, this callback does. All other
+// requests are forwarded to the default queue.
+_Use_decl_annotations_
+VOID
+TtEvtIoInCallerContext(
+    WDFDEVICE Device,
+    WDFREQUEST Request
+    )
+{
+    PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
+    WDFFILEOBJECT fileObject = WdfRequestGetFileObject(Request);
+    WDF_REQUEST_PARAMETERS params;
+    ULONG code;
+    UINT32 gateNr;
+    NTSTATUS status;
+
+    WDF_REQUEST_PARAMETERS_INIT(&params);
+    WdfRequestGetParameters(Request, &params);
+
+    if (params.Type != WdfRequestTypeDeviceControl || fileObject == NULL) {
+        goto forward;
+    }
+    code = params.Parameters.DeviceIoControl.IoControlCode;
+
+    if (code != IOCTL_TENSTORRENT_MAP && code != IOCTL_TENSTORRENT_UNMAP &&
+        code != IOCTL_TENSTORRENT_PIN_PAGES &&
+        code != IOCTL_TENSTORRENT_UNPIN_PAGES) {
+        goto forward;
+    }
+
+    // Pin/unpin are Linux ioctls (full gates incl. needs_hw_init); MAP/UNMAP
+    // follow the mmap gate set (no needs_hw_init check, analysis §11).
+    gateNr = (code == IOCTL_TENSTORRENT_PIN_PAGES) ? 7u :
+             (code == IOCTL_TENSTORRENT_UNPIN_PAGES) ? 10u : MAXUINT32;
+    status = TtCheckIoGates(context, fileObject, gateNr);
+    if (NT_SUCCESS(status)) {
+        if (code == IOCTL_TENSTORRENT_MAP) {
+            status = TtIoctlMap(context, fileObject, Request);
+        } else if (code == IOCTL_TENSTORRENT_UNMAP) {
+            status = TtIoctlUnmap(context, fileObject, Request);
+        } else if (code == IOCTL_TENSTORRENT_PIN_PAGES) {
+            status = TtIoctlPinPages(context, fileObject, Request);
+        } else {
+            status = TtIoctlUnpinPages(context, fileObject, Request);
+        }
+    }
+
+    TraceLoggingWrite(g_TtTraceProvider, "CallerContextIoctl",
+                      TraceLoggingUInt32(code, "code"),
+                      TraceLoggingNTStatus(status, "status"));
+    WdfRequestComplete(Request, status);
+    return;
+
+forward:
+    status = WdfDeviceEnqueueRequest(Device, Request);
+    if (!NT_SUCCESS(status)) {
+        WdfRequestComplete(Request, status);
+    }
 }

@@ -34,6 +34,25 @@
 #define TT_VERSION_MINOR 10
 #define TT_VERSION_PATCH 1
 
+// TLB pool geometry (tt-kmd/blackhole.c:20-28): 202 2M windows (id 201 kernel-
+// reserved) + up to 8 4G windows, clamped by BAR4 length at init.
+#define TT_TLB_2M_COUNT 202u
+#define TT_TLB_4G_MAX 8u
+#define TT_TLB_TOTAL (TT_TLB_2M_COUNT + TT_TLB_4G_MAX)
+
+// Outbound iATU regions (tt-kmd/memory.h:65-71, blackhole.c:78)
+#define TT_IATU_REGIONS 16u
+// Blackhole NOC-DMA address space (blackhole.c:817-818)
+#define TT_BH_NOC_DMA_LIMIT ((1ull << 58) - 1)
+#define TT_BH_NOC_PCIE_OFFSET (4ull << 58)
+
+#define TT_MAX_DMA_BUF_SIZE (1ull << 28)   // MAX_DMA_BUF_SIZE_LOG2=28, memory.h:10
+
+// Pool tags per subsystem
+#define TT_TAG_MAPPING 'pMtT'
+#define TT_TAG_PINNING 'nPtT'
+#define TT_TAG_DMABUF  'bDtT'
+
 // Per-device context. Maps to: tt-kmd struct tenstorrent_device (device.h:21).
 typedef struct _TT_DEVICE_CONTEXT {
     WDFDEVICE Device;
@@ -75,15 +94,69 @@ typedef struct _TT_DEVICE_CONTEXT {
     // per-tag absolute CSM value address, 0 = tag absent.
     UINT64 TelemetryTagCache[128];
     BOOLEAN TelemetryValid;
+
+    // M3: TLB pool (tt-kmd tt_dev->tlbs bitmap parity, single-owner model
+    // per DD-8). Owner file object, NULL = free; id 201 reserved at init with
+    // KernelReserved. Guarded by TlbLock.
+    WDFWAITLOCK TlbLock;
+    WDFFILEOBJECT TlbOwner[TT_TLB_TOTAL];
+    BOOLEAN TlbUsed[TT_TLB_TOTAL];
+    UINT32 Tlb4gCount;             // clamped by BAR4 length (blackhole_init)
+
+    // M3: outbound iATU region table (tt-kmd tt_dev->outbound_iatus parity),
+    // guarded by IatuLock.
+    WDFWAITLOCK IatuLock;
+    struct {
+        BOOLEAN Used;
+        WDFFILEOBJECT Owner;
+        UINT64 Base;
+        UINT64 Limit;
+        UINT64 Target;
+    } Iatu[TT_IATU_REGIONS];
+
+    // M3: DMA enabler for coherent (common) buffers.
+    WDFDMAENABLER DmaEnabler;
 } TT_DEVICE_CONTEXT, *PTT_DEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_DEVICE_CONTEXT, TtGetDeviceContext)
 
+// One user-mode mapping created by IOCTL_TENSTORRENT_MAP (DD-8).
+typedef struct _TT_USER_MAPPING {
+    LIST_ENTRY Entry;
+    PVOID UserVa;
+    PMDL Mdl;
+    PVOID KernelVa;          // MmMapIoSpaceEx VA for device memory, else NULL
+    SIZE_T Length;
+    LONG TlbId;              // -1 unless this maps a TLB window (FREE_TLB -EBUSY)
+} TT_USER_MAPPING, *PTT_USER_MAPPING;
+
+struct tenstorrent_noc_tlb_config;
+
+// One pinned user range from PIN_PAGES (tt-kmd struct pinned_page_range).
+typedef struct _TT_PINNING {
+    LIST_ENTRY Entry;
+    UINT64 VirtualAddress;   // original pin VA (match key for UNPIN)
+    UINT64 Size;
+    PMDL Mdl;                // probe-and-locked
+    LONG IatuRegion;         // -1 = none
+} TT_PINNING, *PTT_PINNING;
+
+// One coherent DMA buffer (tt-kmd struct dmabuf).
+typedef struct _TT_DMABUF {
+    WDFCOMMONBUFFER Buffer;
+    UINT32 Size;
+    LONG IatuRegion;         // -1 = none
+} TT_DMABUF, *PTT_DMABUF;
+
 // Per-open-handle context. Maps to: tt-kmd struct chardev_private
-// (chardev_private.h) — M1 carries only the reset-generation latch
-// (chardev.c:812 open_reset_gen parity).
+// (chardev_private.h): reset-generation latch (chardev.c:812), dmabufs,
+// pinnings, and user mappings, all torn down at handle cleanup.
 typedef struct _TT_FILE_CONTEXT {
     LONG64 OpenResetGen;
+    WDFWAITLOCK Lock;        // priv->mutex parity; NULL until first use path
+    LIST_ENTRY Mappings;     // TT_USER_MAPPING
+    LIST_ENTRY Pinnings;     // TT_PINNING
+    PTT_DMABUF DmaBufs[256]; // by buf_index (TENSTORRENT_MAX_DMA_BUFS)
 } TT_FILE_CONTEXT, *PTT_FILE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_FILE_CONTEXT, TtGetFileContext)
@@ -92,4 +165,45 @@ EVT_WDF_DRIVER_DEVICE_ADD TtEvtDeviceAdd;
 EVT_WDF_DEVICE_PREPARE_HARDWARE TtEvtDevicePrepareHardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE TtEvtDeviceReleaseHardware;
 EVT_WDF_DEVICE_FILE_CREATE TtEvtDeviceFileCreate;
+EVT_WDF_FILE_CLEANUP TtEvtFileCleanup;
+EVT_WDF_IO_IN_CALLER_CONTEXT TtEvtIoInCallerContext;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL TtEvtIoDeviceControl;
+
+// Shared gate check (chardev.c:591-624 parity); used by both the queue path
+// and the in-caller-context path.
+NTSTATUS TtCheckIoGates(_In_ PTT_DEVICE_CONTEXT Context,
+                        _In_opt_ WDFFILEOBJECT FileObject, _In_ UINT32 Nr);
+
+// memory.c (maps to tt-kmd memory.c + tlb.c)
+NTSTATUS TtIoctlAllocateDmaBuf(_In_ PTT_DEVICE_CONTEXT Context,
+                               _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+NTSTATUS TtIoctlAllocateTlb(_In_ PTT_DEVICE_CONTEXT Context,
+                            _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+NTSTATUS TtIoctlFreeTlb(_In_ PTT_DEVICE_CONTEXT Context,
+                        _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+NTSTATUS TtIoctlConfigureTlb(_In_ PTT_DEVICE_CONTEXT Context,
+                             _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+NTSTATUS TtIoctlMap(_In_ PTT_DEVICE_CONTEXT Context,
+                    _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+NTSTATUS TtIoctlUnmap(_In_ PTT_DEVICE_CONTEXT Context,
+                      _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+NTSTATUS TtIoctlPinPages(_In_ PTT_DEVICE_CONTEXT Context,
+                         _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+NTSTATUS TtIoctlUnpinPages(_In_ PTT_DEVICE_CONTEXT Context,
+                           _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+VOID TtMemoryFileCleanup(_In_ PTT_DEVICE_CONTEXT Context,
+                         _In_ WDFFILEOBJECT FileObject);
+NTSTATUS TtFileContextInitMemory(_In_ WDFFILEOBJECT FileObject);
+
+// ioctl.c helpers shared with memory.c
+NTSTATUS TtCopyInBuffer(_In_ WDFREQUEST Request,
+                        _Out_writes_bytes_(InSize) VOID *In, _In_ size_t InSize);
+NTSTATUS TtCompleteSizedOutBuffer(_In_ WDFREQUEST Request, _In_ size_t OutOffset,
+                                  _In_reads_bytes_(OutSize) const VOID *Out,
+                                  _In_ size_t OutSize, _In_ UINT32 Declared);
+
+// blackhole.c M3 surface
+NTSTATUS TtBhConfigureUserTlb(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Id,
+                              _In_ const struct tenstorrent_noc_tlb_config *Config);
+NTSTATUS TtBhConfigureOutboundAtu(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Region,
+                                  _In_ UINT64 Base, _In_ UINT64 Limit, _In_ UINT64 Target);

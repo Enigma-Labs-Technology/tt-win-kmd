@@ -7,6 +7,7 @@
 // WPTR publish → doorbell, per the porting note, so the sequence stays correct
 // on weaker-ordered targets too.
 #include "ttkmd.h"
+#include "ttkmd_ioctl.h"
 #include "blackhole.h"
 
 // --- 2 MiB TLB window register (blackhole.c:112-137) ---------------------
@@ -67,6 +68,109 @@ TtBhConfigureKernelTlb(
     // (blackhole.c:192-196 conditional never fires for the kernel window).
 
     return Context->KernelTlb + offset;
+}
+
+// blackhole_configure_tlb_2M / _4G parity (blackhole.c:112-198): programs a
+// user window's 96-bit config register. The uAPI `static_vc` byte maps to the
+// hardware `use_static_vc` bit; the 3-bit hw static_vc field and stream_header
+// are never programmed (upstream parity). Strided config is cleared for the
+// first 32 2M windows (blackhole.c:192-196).
+_Use_decl_annotations_
+NTSTATUS
+TtBhConfigureUserTlb(
+    struct _TT_DEVICE_CONTEXT *Context,
+    UINT32 Id,
+    const struct tenstorrent_noc_tlb_config *Config
+    )
+{
+    UINT32 words[3] = { 0, 0, 0 };
+    volatile UCHAR *regs = Context->TlbRegs + (Id * TT_BH_TLB_REG_SIZE);
+    BOOLEAN is2M = Id < TT_TLB_2M_COUNT;
+    UINT64 windowMask = is2M ? (TT_BH_KERNEL_TLB_LEN - 1) : ((1ull << 32) - 1);
+
+    if (Config->addr & windowMask) {
+        return STATUS_INVALID_PARAMETER;   // -EINVAL: unaligned window base
+    }
+
+    if (is2M) {
+        TtBhSetBits(words, 0, 43, Config->addr >> 21);
+        TtBhSetBits(words, 43, 6, Config->x_end);
+        TtBhSetBits(words, 49, 6, Config->y_end);
+        TtBhSetBits(words, 55, 6, Config->x_start);
+        TtBhSetBits(words, 61, 6, Config->y_start);
+        TtBhSetBits(words, 67, 2, Config->noc);
+        TtBhSetBits(words, 69, 1, Config->mcast);
+        TtBhSetBits(words, 70, 2, Config->ordering);
+        TtBhSetBits(words, 72, 1, Config->linked);
+        TtBhSetBits(words, 73, 1, Config->static_vc);   // use_static_vc
+    } else {
+        TtBhSetBits(words, 0, 32, Config->addr >> 32);
+        TtBhSetBits(words, 32, 6, Config->x_end);
+        TtBhSetBits(words, 38, 6, Config->y_end);
+        TtBhSetBits(words, 44, 6, Config->x_start);
+        TtBhSetBits(words, 50, 6, Config->y_start);
+        TtBhSetBits(words, 56, 2, Config->noc);
+        TtBhSetBits(words, 58, 1, Config->mcast);
+        TtBhSetBits(words, 59, 2, Config->ordering);
+        TtBhSetBits(words, 61, 1, Config->linked);
+        TtBhSetBits(words, 62, 1, Config->static_vc);   // use_static_vc
+    }
+
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0), words[0]);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 4), words[1]);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 8), words[2]);
+
+    if (Id < 32) {   // TLB_STRIDED_COUNT
+        volatile UCHAR *strided = Context->TlbRegs +
+            (TT_TLB_2M_COUNT + TT_TLB_4G_MAX) * TT_BH_TLB_REG_SIZE + (Id * 4);
+
+        WRITE_REGISTER_ULONG((volatile ULONG *)strided, 0);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+// blackhole_configure_outbound_atu parity (blackhole.c:755-788): programs one
+// outbound iATU region in BAR2 (IATU_BASE 0x1000, stride 0x100).
+_Use_decl_annotations_
+NTSTATUS
+TtBhConfigureOutboundAtu(
+    struct _TT_DEVICE_CONTEXT *Context,
+    UINT32 Region,
+    UINT64 Base,
+    UINT64 Limit,
+    UINT64 Target
+    )
+{
+    volatile UCHAR *regs;
+    UINT64 size = Limit - Base + 1;
+    UINT32 ctrl1 = 1u << 13;                       // INCREASE_REGION_SIZE
+    UINT32 ctrl2 = (Limit == 0) ? 0 : (1u << 31);  // REGION_EN
+
+    if (Limit != 0 && size > (1ull << 40)) {
+        return STATUS_INVALID_PARAMETER;   // iATU max region 1T
+    }
+    if (Region >= TT_IATU_REGIONS) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    regs = Context->Bar2Mapping + 0x1000 + (Region * 0x100);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x08), (UINT32)Base);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x0C), (UINT32)(Base >> 32));
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x14), (UINT32)Target);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x18), (UINT32)(Target >> 32));
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x10), (UINT32)Limit);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x20), (UINT32)(Limit >> 32));
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x00), ctrl1);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x04), ctrl2);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x1C), 0);
+
+    TraceLoggingWrite(g_TtTraceProvider, "IatuConfigured",
+                      TraceLoggingUInt32(Region, "region"),
+                      TraceLoggingUInt64(Base, "base"),
+                      TraceLoggingUInt64(Limit, "limit"),
+                      TraceLoggingUInt64(Target, "target"));
+    return STATUS_SUCCESS;
 }
 
 // Maps to noc_read32/noc_write32 (blackhole.c:245-268): each 32-bit access

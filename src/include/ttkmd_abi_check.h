@@ -57,6 +57,51 @@ TT_ABI_FIELD(tenstorrent_get_driver_info_out, reserved0, 11, 1);
 TT_ABI_SIZE(tenstorrent_get_driver_info, 16);
 TT_ABI_FIELD(tenstorrent_get_driver_info, out, 4, 12);
 
+// ALLOCATE_DMA_BUF (nr 3)
+TT_ABI_SIZE(tenstorrent_allocate_dma_buf_in, 24);
+TT_ABI_FIELD(tenstorrent_allocate_dma_buf_in, requested_size, 0, 4);
+TT_ABI_FIELD(tenstorrent_allocate_dma_buf_in, buf_index, 4, 1);
+TT_ABI_FIELD(tenstorrent_allocate_dma_buf_in, flags, 5, 1);
+TT_ABI_FIELD(tenstorrent_allocate_dma_buf_in, reserved1, 8, 16);
+TT_ABI_SIZE(tenstorrent_allocate_dma_buf_out, 40);
+TT_ABI_FIELD(tenstorrent_allocate_dma_buf_out, physical_address, 0, 8);
+TT_ABI_FIELD(tenstorrent_allocate_dma_buf_out, mapping_offset, 8, 8);
+TT_ABI_FIELD(tenstorrent_allocate_dma_buf_out, size, 16, 4);
+TT_ABI_FIELD(tenstorrent_allocate_dma_buf_out, noc_address, 24, 8);
+TT_ABI_SIZE(tenstorrent_allocate_dma_buf, 64);
+
+// PIN_PAGES (nr 7) / UNPIN_PAGES (nr 10)
+TT_ABI_SIZE(tenstorrent_pin_pages_in, 24);
+TT_ABI_FIELD(tenstorrent_pin_pages_in, output_size_bytes, 0, 4);
+TT_ABI_FIELD(tenstorrent_pin_pages_in, flags, 4, 4);
+TT_ABI_FIELD(tenstorrent_pin_pages_in, virtual_address, 8, 8);
+TT_ABI_FIELD(tenstorrent_pin_pages_in, size, 16, 8);
+TT_ABI_SIZE(tenstorrent_pin_pages_out, 8);
+TT_ABI_SIZE(tenstorrent_pin_pages_out_extended, 16);
+TT_ABI_FIELD(tenstorrent_pin_pages_out_extended, noc_address, 8, 8);
+TT_ABI_SIZE(tenstorrent_pin_pages, 32);
+TT_ABI_SIZE(tenstorrent_unpin_pages_in, 24);
+TT_ABI_FIELD(tenstorrent_unpin_pages_in, reserved, 16, 8);
+
+// ALLOCATE/FREE/CONFIGURE_TLB (nrs 11-13)
+TT_ABI_SIZE(tenstorrent_allocate_tlb_in, 16);
+TT_ABI_SIZE(tenstorrent_allocate_tlb_out, 32);
+TT_ABI_FIELD(tenstorrent_allocate_tlb_out, id, 0, 4);
+TT_ABI_FIELD(tenstorrent_allocate_tlb_out, mmap_offset_uc, 8, 8);
+TT_ABI_FIELD(tenstorrent_allocate_tlb_out, mmap_offset_wc, 16, 8);
+TT_ABI_SIZE(tenstorrent_allocate_tlb, 48);
+TT_ABI_SIZE(tenstorrent_free_tlb_in, 4);
+TT_ABI_SIZE(tenstorrent_noc_tlb_config, 32);
+TT_ABI_FIELD(tenstorrent_noc_tlb_config, addr, 0, 8);
+TT_ABI_FIELD(tenstorrent_noc_tlb_config, x_end, 8, 2);
+TT_ABI_FIELD(tenstorrent_noc_tlb_config, noc, 16, 1);
+TT_ABI_FIELD(tenstorrent_noc_tlb_config, static_vc, 20, 1);
+TT_ABI_FIELD(tenstorrent_noc_tlb_config, reserved1, 24, 8);
+TT_ABI_SIZE(tenstorrent_configure_tlb_in, 40);
+TT_ABI_FIELD(tenstorrent_configure_tlb_in, config, 8, 32);
+TT_ABI_SIZE(tenstorrent_configure_tlb_out, 8);
+TT_ABI_SIZE(tenstorrent_configure_tlb, 48);
+
 // CTL_CODE values fixed by DD-4; a change here is an ABI break for user mode.
 static_assert(IOCTL_TENSTORRENT_GET_DEVICE_INFO == 0x80FA2000, "CTL code drift");
 static_assert(IOCTL_TENSTORRENT_QUERY_MAPPINGS == 0x80FA2008, "CTL code drift");

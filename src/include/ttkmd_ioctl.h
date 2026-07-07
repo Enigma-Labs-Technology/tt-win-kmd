@@ -141,6 +141,176 @@ struct tenstorrent_get_driver_info {
     struct tenstorrent_get_driver_info_out out;
 };
 
+// --- ALLOCATE_DMA_BUF (nr 3), tt-kmd/ioctl.h:88-111 ---
+#define TENSTORRENT_MAX_DMA_BUFS 256
+#define TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA 2
+
+struct tenstorrent_allocate_dma_buf_in {
+    uint32_t requested_size;   // page-multiple, <= 1<<28
+    uint8_t buf_index;         // [0, TENSTORRENT_MAX_DMA_BUFS)
+    uint8_t flags;
+    uint8_t reserved0[2];
+    uint64_t reserved1[2];
+};
+
+struct tenstorrent_allocate_dma_buf_out {
+    uint64_t physical_address; // bus/logical address
+    uint64_t mapping_offset;   // MAP token: 0xF00_0000_0000 + idx*4GiB
+    uint32_t size;
+    uint32_t reserved0;
+    uint64_t noc_address;      // valid if NOC_DMA flag set
+    uint64_t reserved1;
+};
+
+struct tenstorrent_allocate_dma_buf {
+    struct tenstorrent_allocate_dma_buf_in in;
+    struct tenstorrent_allocate_dma_buf_out out;
+};
+
+// --- PIN_PAGES (nr 7) / UNPIN_PAGES (nr 10), tt-kmd/ioctl.h:168-208 ---
+#define TENSTORRENT_PIN_PAGES_CONTIGUOUS 1   // vestigial (contiguity always checked)
+#define TENSTORRENT_PIN_PAGES_NOC_DMA 2
+#define TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN 4 // implies a NOC mapping even alone
+#define TENSTORRENT_PIN_PAGES_READ_ONLY 8    // requires IOMMU: STATUS_NOT_SUPPORTED here
+
+struct tenstorrent_pin_pages_in {
+    uint32_t output_size_bytes;
+    uint32_t flags;
+    uint64_t virtual_address;  // page-aligned
+    uint64_t size;             // page-multiple, nonzero
+};
+
+struct tenstorrent_pin_pages_out {
+    uint64_t physical_address;
+};
+
+struct tenstorrent_pin_pages_out_extended {
+    uint64_t physical_address;
+    uint64_t noc_address;
+};
+
+struct tenstorrent_pin_pages {
+    struct tenstorrent_pin_pages_in in;
+    struct tenstorrent_pin_pages_out out;
+};
+
+struct tenstorrent_unpin_pages_in {
+    uint64_t virtual_address;  // original pin VA
+    uint64_t size;             // must match the pin exactly
+    uint64_t reserved;         // must be 0
+};
+
+struct tenstorrent_unpin_pages {
+    struct tenstorrent_unpin_pages_in in;
+};
+
+// --- ALLOCATE/FREE/CONFIGURE_TLB (nrs 11-13), tt-kmd/ioctl.h:270-328 ---
+#define TENSTORRENT_MAX_INBOUND_TLBS 256
+
+struct tenstorrent_allocate_tlb_in {
+    uint64_t size;             // exact pool size: 2 MiB or 4 GiB on Blackhole
+    uint64_t reserved;
+};
+
+struct tenstorrent_allocate_tlb_out {
+    uint32_t id;
+    uint32_t reserved0;
+    uint64_t mmap_offset_uc;   // MAP token
+    uint64_t mmap_offset_wc;   // MAP token
+    uint64_t reserved1;
+};
+
+struct tenstorrent_allocate_tlb {
+    struct tenstorrent_allocate_tlb_in in;
+    struct tenstorrent_allocate_tlb_out out;
+};
+
+struct tenstorrent_free_tlb_in {
+    uint32_t id;
+};
+
+struct tenstorrent_free_tlb {
+    struct tenstorrent_free_tlb_in in;
+};
+
+struct tenstorrent_noc_tlb_config {
+    uint64_t addr;             // window-size aligned NOC address
+    uint16_t x_end;
+    uint16_t y_end;
+    uint16_t x_start;
+    uint16_t y_start;
+    uint8_t noc;
+    uint8_t mcast;
+    uint8_t ordering;
+    uint8_t linked;
+    uint8_t static_vc;
+    uint8_t reserved0[3];
+    uint32_t reserved1[2];
+};
+
+struct tenstorrent_configure_tlb_in {
+    uint32_t id;
+    uint32_t reserved;
+    struct tenstorrent_noc_tlb_config config;
+};
+
+struct tenstorrent_configure_tlb_out {
+    uint64_t reserved;
+};
+
+struct tenstorrent_configure_tlb {
+    struct tenstorrent_configure_tlb_in in;
+    struct tenstorrent_configure_tlb_out out;
+};
+
+// --- Windows extensions: MAP/UNMAP (function codes 0x900+, DD-8) ------------
+// Replace mmap/munmap. mmap_offset is the opaque Linux token from
+// QUERY_MAPPINGS.mapping_base / ALLOCATE_DMA_BUF.mapping_offset /
+// ALLOCATE_TLB.mmap_offset_uc/wc, plus any byte offset within the region
+// (tt-umd adds BAR-relative offsets to mapping_base). Mappings are per-handle
+// and force-unmapped at handle close.
+#define TT_CTL_EXT(nr) \
+    CTL_CODE(TT_DEVICE_TYPE, 0x900u + (nr), METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define IOCTL_TENSTORRENT_MAP   TT_CTL_EXT(0)
+#define IOCTL_TENSTORRENT_UNMAP TT_CTL_EXT(1)
+
+struct tenstorrent_map_in {
+    uint64_t mmap_offset;      // token + byte offset (page-aligned)
+    uint64_t length;           // page-multiple, nonzero
+};
+
+struct tenstorrent_map_out {
+    uint64_t user_va;
+};
+
+struct tenstorrent_map {
+    struct tenstorrent_map_in in;
+    struct tenstorrent_map_out out;
+};
+
+struct tenstorrent_unmap_in {
+    uint64_t user_va;          // value returned by MAP
+    uint64_t reserved;         // must be 0
+};
+
+struct tenstorrent_unmap {
+    struct tenstorrent_unmap_in in;
+};
+
+// Linux mmap-offset tokens (memory.c:258-274; frozen at the 4K-page values)
+#define TT_MMAP_OFFSET_RESOURCE0_UC (0ull << 36)
+#define TT_MMAP_OFFSET_RESOURCE0_WC (1ull << 36)
+#define TT_MMAP_OFFSET_RESOURCE1_UC (2ull << 36)
+#define TT_MMAP_OFFSET_RESOURCE1_WC (3ull << 36)
+#define TT_MMAP_OFFSET_RESOURCE2_UC (4ull << 36)
+#define TT_MMAP_OFFSET_RESOURCE2_WC (5ull << 36)
+#define TT_MMAP_OFFSET_TLB_UC       (6ull << 36)
+#define TT_MMAP_OFFSET_TLB_WC       (7ull << 36)
+#define TT_MMAP_RESOURCE_SIZE       (1ull << 36)
+#define TT_MMAP_OFFSET_DMA_BUF      0xF000000000ull   // (4096-255-1) << 32
+#define TT_MMAP_SIZE_DMA_BUF        (1ull << 32)      // 4 GiB per slot
+
 #pragma pack(pop)
 
 #endif // TTKMD_IOCTL_H_INCLUDED
