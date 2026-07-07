@@ -205,6 +205,16 @@ TtEvtFileCleanup(
     // (release takes reset_rwsem shared, chardev.c:929).
     TtResetAcquireShared(context);
 
+    // NOC cleanup write (tt_cdev_release_noc_cleanup, chardev.c:865-875):
+    // skipped only when detached (hardware gone).
+    if (fileContext->NocCleanupEnabled && !context->Detached &&
+        context->IsBlackhole) {
+        TtBhNocWrite(context, fileContext->NocCleanupX, fileContext->NocCleanupY,
+                     fileContext->NocCleanupAddr,
+                     (UINT32)(fileContext->NocCleanupData & 0xFFFFFFFF),
+                     fileContext->NocCleanupNoc);
+    }
+
     // Release all resource locks this handle held; wakes blocking waiters
     // (chardev.c:877-885). Before delisting so waiter gen checks are correct.
     TtLocksReleaseAll(context, FileObject);

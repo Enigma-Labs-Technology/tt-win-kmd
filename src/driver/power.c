@@ -149,3 +149,44 @@ TtIoctlSetPowerState(
     WdfRequestSetInformation(Request, 0);
     return STATUS_SUCCESS;
 }
+
+// ioctl_set_noc_cleanup (chardev.c:432-475). argsz protocol, input-only. Stores
+// a NOC write to perform at handle close (device-side cleanup on abnormal exit).
+_Use_decl_annotations_
+NTSTATUS
+TtIoctlSetNocCleanup(
+    PTT_DEVICE_CONTEXT Context,
+    WDFFILEOBJECT FileObject,
+    WDFREQUEST Request
+    )
+{
+    PTT_FILE_CONTEXT fileContext = TtGetFileContext(FileObject);
+    struct tenstorrent_set_noc_cleanup in;
+    NTSTATUS status;
+
+    if (!Context->IsBlackhole) {
+        return STATUS_NOT_SUPPORTED;   // no noc_write32 -> -EOPNOTSUPP
+    }
+
+    status = TtCopyInBuffer(Request, &in, sizeof(in));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    // Validation order (chardev.c:448-469).
+    if (in.argsz != sizeof(in) || in.flags != 0 || in.enabled > 1 ||
+        (in.addr & 0x3) != 0 || in.noc > 1 || in.x > 64 || in.y > 64) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    WdfWaitLockAcquire(fileContext->Lock, NULL);
+    fileContext->NocCleanupEnabled = (in.enabled != 0);
+    fileContext->NocCleanupX = in.x;
+    fileContext->NocCleanupY = in.y;
+    fileContext->NocCleanupNoc = in.noc;
+    fileContext->NocCleanupAddr = in.addr;
+    fileContext->NocCleanupData = in.data;
+    WdfWaitLockRelease(fileContext->Lock);
+
+    WdfRequestSetInformation(Request, 0);
+    return STATUS_SUCCESS;
+}

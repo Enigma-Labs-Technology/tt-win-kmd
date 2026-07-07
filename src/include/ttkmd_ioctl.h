@@ -49,7 +49,7 @@ DEFINE_GUID(GUID_DEVINTERFACE_TENSTORRENT,
 #define IOCTL_TENSTORRENT_ALLOCATE_TLB      TT_CTL(11)
 #define IOCTL_TENSTORRENT_FREE_TLB          TT_CTL(12)
 #define IOCTL_TENSTORRENT_CONFIGURE_TLB     TT_CTL(13)
-#define IOCTL_TENSTORRENT_SET_NOC_CLEANUP   TT_CTL(14)
+#define IOCTL_TENSTORRENT_SET_NOC_CLEANUP   TT_CTL(14)  // struct tenstorrent_set_noc_cleanup
 #define IOCTL_TENSTORRENT_SET_POWER_STATE   TT_CTL(15)
 #define IOCTL_TENSTORRENT_EXPORT_TLB_DMABUF TT_CTL(16)
 
@@ -311,6 +311,21 @@ struct tenstorrent_power_state {
     uint8_t validity;          // TT_POWER_VALIDITY(flags_count, settings_count)
     uint16_t power_flags;      // TT_POWER_FLAG_*
     uint16_t power_settings[14];
+};
+
+// --- SET_NOC_CLEANUP (nr 14), tt-kmd/ioctl.h:349-359 ---
+// Registers a NOC write performed at handle close (device-side cleanup if the
+// app dies). argsz protocol.
+struct tenstorrent_set_noc_cleanup {
+    uint32_t argsz;            // must == sizeof(struct) = 32
+    uint32_t flags;            // must == 0
+    uint8_t enabled;           // 1 to register, 0 to clear
+    uint8_t x;
+    uint8_t y;
+    uint8_t noc;               // 0 or 1
+    uint32_t reserved0;
+    uint64_t addr;             // 4-byte aligned
+    uint64_t data;            // upper 32 bits ignored
 };
 
 // --- RESET_DEVICE (nr 6), tt-kmd/ioctl.h:142-166 ---

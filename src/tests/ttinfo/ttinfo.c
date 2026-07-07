@@ -675,6 +675,40 @@ static void TestM5(const WCHAR *path, HANDLE h, int deviceId)
                agg.power_flags, agg.power_settings[0]);
         CloseHandle(hb);
     }
+
+    // --- SET_NOC_CLEANUP: register + validation -------------------------
+    {
+        struct tenstorrent_set_noc_cleanup nc;
+
+        memset(&nc, 0, sizeof(nc));
+        nc.argsz = sizeof(nc);
+        nc.enabled = 1;
+        nc.x = 1; nc.y = 0; nc.noc = 0;
+        nc.addr = 0x1000;      // 4-byte aligned
+        nc.data = 0xDEADBEEF;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_SET_NOC_CLEANUP, &nc, sizeof(nc), sizeof(nc), &info);
+        CHECK(ok, "SET_NOC_CLEANUP gle=%lu\n", GetLastError());
+
+        // Negatives: unaligned addr, noc>1, bad argsz.
+        nc.addr = 0x1002;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_SET_NOC_CLEANUP, &nc, sizeof(nc), sizeof(nc), &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "noc_cleanup unaligned accepted\n");
+        nc.addr = 0x1000; nc.noc = 2;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_SET_NOC_CLEANUP, &nc, sizeof(nc), sizeof(nc), &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "noc_cleanup bad noc accepted\n");
+        nc.noc = 0; nc.argsz = 8;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_SET_NOC_CLEANUP, &nc, sizeof(nc), sizeof(nc), &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "noc_cleanup bad argsz accepted\n");
+
+        // Clear it so the ttsim NOC write at close targets a harmless tile only
+        // when re-enabled by another test; here disable.
+        nc.argsz = sizeof(nc); nc.enabled = 0;
+        TtIoctl(h, IOCTL_TENSTORRENT_SET_NOC_CLEANUP, &nc, sizeof(nc), sizeof(nc), &info);
+        printf("noc_cleanup: register + validation PASS\n");
+    }
 }
 
 // M4: reset flavors, fd-invalidation, reset-under-mapping. Needs a second

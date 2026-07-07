@@ -126,6 +126,14 @@ TT_ABI_FIELD(tenstorrent_power_state, validity, 9, 1);
 TT_ABI_FIELD(tenstorrent_power_state, power_flags, 10, 2);
 TT_ABI_FIELD(tenstorrent_power_state, power_settings, 12, 28);
 
+// SET_NOC_CLEANUP (nr 14)
+TT_ABI_SIZE(tenstorrent_set_noc_cleanup, 32);
+TT_ABI_FIELD(tenstorrent_set_noc_cleanup, argsz, 0, 4);
+TT_ABI_FIELD(tenstorrent_set_noc_cleanup, enabled, 8, 1);
+TT_ABI_FIELD(tenstorrent_set_noc_cleanup, noc, 11, 1);
+TT_ABI_FIELD(tenstorrent_set_noc_cleanup, addr, 16, 8);
+TT_ABI_FIELD(tenstorrent_set_noc_cleanup, data, 24, 8);
+
 // CTL_CODE values fixed by DD-4; a change here is an ABI break for user mode.
 static_assert(IOCTL_TENSTORRENT_GET_DEVICE_INFO == 0x80FA2000, "CTL code drift");
 static_assert(IOCTL_TENSTORRENT_QUERY_MAPPINGS == 0x80FA2008, "CTL code drift");

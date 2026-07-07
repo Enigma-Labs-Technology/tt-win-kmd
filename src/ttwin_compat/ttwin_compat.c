@@ -170,6 +170,7 @@ static DWORD tt_ioctl_size(unsigned nr, const void *arg)
     case 11: return 48;                                  // allocate_tlb
     case 12: return 4;                                   // free_tlb
     case 13: return 48;                                  // configure_tlb
+    case 14: return 32;                                  // set_noc_cleanup
     case 15: return 40;                                  // set_power_state
     default: return 0;                                   // unsupported by driver
     }

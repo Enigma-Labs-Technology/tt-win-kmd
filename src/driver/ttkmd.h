@@ -201,6 +201,15 @@ typedef struct _TT_FILE_CONTEXT {
     UINT8 PowerValidity;
     UINT16 PowerFlags;
     UINT16 PowerSettings[14];
+
+    // SET_NOC_CLEANUP registration (priv->noc_cleanup parity): a NOC write
+    // performed at handle close for device-side cleanup.
+    BOOLEAN NocCleanupEnabled;
+    UINT8 NocCleanupX;
+    UINT8 NocCleanupY;
+    UINT8 NocCleanupNoc;
+    UINT64 NocCleanupAddr;
+    UINT64 NocCleanupData;
 } TT_FILE_CONTEXT, *PTT_FILE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_FILE_CONTEXT, TtGetFileContext)
@@ -255,6 +264,10 @@ NTSTATUS TtBhConfigureOutboundAtu(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 R
                                   _In_ UINT64 Base, _In_ UINT64 Limit, _In_ UINT64 Target);
 BOOLEAN TtBhReset(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Flags);
 BOOLEAN TtBhInitHardware(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtBhNocWrite(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 X, _In_ UINT32 Y,
+                  _In_ UINT64 Addr, _In_ UINT32 Data, _In_ UINT32 Noc);
+NTSTATUS TtIoctlSetNocCleanup(_In_ PTT_DEVICE_CONTEXT Context,
+                              _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
 
 // reset.c (maps to tt-kmd chardev.c reset handler + pcie.c primitives)
 NTSTATUS TtIoctlResetDevice(_In_ PTT_DEVICE_CONTEXT Context,

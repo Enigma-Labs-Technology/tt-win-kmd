@@ -443,6 +443,9 @@ TtEvtIoDeviceControl(
         }
         break;
     }
+    case 14:
+        status = TtIoctlSetNocCleanup(context, fileObject, Request);
+        break;
     case 15:
         status = TtIoctlSetPowerState(context, fileObject, Request);
         break;

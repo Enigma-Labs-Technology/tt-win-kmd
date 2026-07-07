@@ -214,6 +214,22 @@ TtBhNocWrite32(
     WdfWaitLockRelease(Context->KernelTlbLock);
 }
 
+// Public NOC write for SET_NOC_CLEANUP (dev_class->noc_write32 parity,
+// blackhole.c:790-794): an arbitrary-coordinate NOC write, not the ARC path.
+_Use_decl_annotations_
+VOID
+TtBhNocWrite(
+    struct _TT_DEVICE_CONTEXT *Context,
+    UINT32 X,
+    UINT32 Y,
+    UINT64 Addr,
+    UINT32 Data,
+    UINT32 Noc
+    )
+{
+    TtBhNocWrite32(Context, X, Y, Addr, Data, Noc);
+}
+
 // Maps to is_range_within_csm (telemetry.h:75-78) + csm_read32/csm_write32
 // (blackhole.c:270-286). Returns FALSE on range violation (-EINVAL parity).
 static BOOLEAN
