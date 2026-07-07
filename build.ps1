@@ -54,6 +54,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "Build failed with exit code $LASTEXITCODE"
 }
 
+# User-mode conformance tests (same warnings-as-errors bar).
+$ttinfo = Join-Path $PSScriptRoot 'src\tests\ttinfo\ttinfo.vcxproj'
+cmd /c "`"$ewdk\BuildEnv\SetupBuildEnv.cmd`" && msbuild `"$ttinfo`" /nologo /m /warnaserror /p:Configuration=$Configuration /p:Platform=x64"
+if ($LASTEXITCODE -ne 0) {
+    throw "ttinfo build failed with exit code $LASTEXITCODE"
+}
+
 $outDir = Join-Path $PSScriptRoot "src\driver\x64\$Configuration"
 
 # The driver targets stage the package (x64\<config>\ttkmd\), run Inf2Cat, and

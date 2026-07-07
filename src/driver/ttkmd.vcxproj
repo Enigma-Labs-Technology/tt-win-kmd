@@ -66,6 +66,7 @@
   <ItemGroup>
     <ClCompile Include="driver.c" />
     <ClCompile Include="device.c" />
+    <ClCompile Include="ioctl.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ttkmd.h" />

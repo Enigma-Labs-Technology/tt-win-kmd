@@ -27,6 +27,11 @@ rsync -a --delete \
     --exclude 'out' \
     --exclude 'test/vm/*.qcow2' \
     --exclude 'test/vm/*.img' \
+    --exclude 'test/vm/*.iso' \
+    --exclude 'test/vm/OVMF_VARS.fd' \
+    --exclude 'test/vm/qmp.sock' \
+    --exclude 'test/qemu-ttsim/qemu' \
+    --exclude 'test/qemu-ttsim/qemu-*.tar.xz' \
     "$REPO_DIR/" "$STAGE_WSL/"
 
 PS_ARGS=(-NoProfile -ExecutionPolicy Bypass -File "$STAGE_WIN\\build.ps1" -Configuration "$CONFIG")
@@ -39,4 +44,5 @@ mkdir -p "$OUT"
 SRC="$STAGE_WSL/src/driver/x64/$CONFIG"
 find "$SRC" \( -name 'ttkmd.sys' -o -name 'ttkmd.inf' -o -name '*.cat' -o -name 'ttkmd.pdb' -o -name 'tt-test.cer' \) \
     -exec cp -v {} "$OUT/" \;
+cp -v "$STAGE_WSL/src/tests/ttinfo/x64/$CONFIG/ttinfo.exe" "$OUT/" 2>/dev/null || true
 echo "Artifacts in $OUT"

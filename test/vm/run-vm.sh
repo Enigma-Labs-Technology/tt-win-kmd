@@ -9,12 +9,13 @@ cd "$(dirname "$0")"
 MEM=${MEM:-8192}
 SMP=${SMP:-8}
 SSH_PORT=${SSH_PORT:-2222}
+QEMU_BIN=${QEMU_BIN:-qemu-system-x86_64}   # point at test/qemu-ttsim/qemu/build/... for ttsim
 OVMF_CODE=$({ ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null || true; } | head -1)
 EXTRA_DEVICES=${EXTRA_DEVICES:-}   # e.g. "-device ttsim-bh,ttsim-lib=/path/libttsim.so" (M1+)
 
 [ -f win11.qcow2 ] || { echo "run make-vm.sh first" >&2; exit 1; }
 
-exec qemu-system-x86_64 \
+exec "$QEMU_BIN" \
     -enable-kvm -machine q35 -cpu host -smp "$SMP" -m "$MEM" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file=OVMF_VARS.fd \
