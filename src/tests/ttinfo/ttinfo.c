@@ -16,6 +16,7 @@
 #include <initguid.h>
 #include "ttkmd_ioctl.h"
 #include "ttkmd_abi_check.h"
+#include "ttkmd_debug.h"
 
 static int g_failures;
 
@@ -56,7 +57,7 @@ static void TestDriverInfo(HANDLE h)
            arg.out.driver_version_patch);
 }
 
-static void TestDeviceInfo(HANDLE h, int *isRealDevice)
+static void TestDeviceInfo(HANDLE h, int *isRealDevice, int *deviceId)
 {
     struct tenstorrent_get_device_info arg;
     DWORD info;
@@ -71,6 +72,7 @@ static void TestDeviceInfo(HANDLE h, int *isRealDevice)
           "out.output_size_bytes=%u\n", arg.out.output_size_bytes);
 
     *isRealDevice = (arg.out.vendor_id != 0);
+    *deviceId = arg.out.device_id;
     if (*isRealDevice) {
         CHECK(arg.out.vendor_id == 0x1E52, "vendor=%04x\n", arg.out.vendor_id);
         CHECK(arg.out.device_id == 0xB140 || arg.out.device_id == 0x401E,
@@ -175,6 +177,91 @@ static void TestNegative(HANDLE h)
           "short-input: ok=%d gle=%lu\n", ok, GetLastError());
 }
 
+// M2: telemetry + ARC message round-trip against the ttsim-backed Blackhole
+// (debug ioctl surface; values asserted against ttsim's emulated CMFW state,
+// ttsim tile.cpp telem[] table + heartbeat test-rig patch).
+static void TestM2Firmware(HANDLE h, int deviceId)
+{
+    struct tenstorrent_debug_read_telemetry t;
+    struct tenstorrent_debug_arc_msg m;
+    DWORD info;
+    BOOL ok;
+    uint32_t hb1, hb2;
+
+    if (deviceId != 0xB140) {
+        // Soft device: debug telemetry must report NOT_SUPPORTED (no BH HW).
+        memset(&t, 0, sizeof(t));
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
+                     sizeof(t), &info);
+        CHECK(!ok && GetLastError() == ERROR_NOT_SUPPORTED,
+              "soft-dev telemetry: ok=%d gle=%lu\n", ok, GetLastError());
+        return;
+    }
+
+    // Board ID high (tag 1): ttsim reports P150 (0x400).
+    memset(&t, 0, sizeof(t));
+    t.tag_id = 1;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
+                 sizeof(t), &info);
+    CHECK(ok, "telemetry tag1 failed, gle=%lu\n", GetLastError());
+    CHECK(t.value == 0x400, "board_id_high=%#x\n", t.value);
+
+    // AICLK (tag 14): ttsim reports 1000 MHz.
+    memset(&t, 0, sizeof(t));
+    t.tag_id = 14;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
+                 sizeof(t), &info);
+    CHECK(ok, "telemetry tag14 failed, gle=%lu\n", GetLastError());
+    CHECK(t.value == 1000, "aiclk=%u\n", t.value);
+
+    // Absent tag -> STATUS_NOT_FOUND (-ENODATA parity); ttsim has no tag 5.
+    memset(&t, 0, sizeof(t));
+    t.tag_id = 5;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
+                 sizeof(t), &info);
+    CHECK(!ok && GetLastError() == ERROR_NOT_FOUND,
+          "absent tag: ok=%d gle=%lu\n", ok, GetLastError());
+
+    // Out-of-range tag -> -EINVAL parity.
+    memset(&t, 0, sizeof(t));
+    t.tag_id = 128;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
+                 sizeof(t), &info);
+    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+          "tag>=128: ok=%d gle=%lu\n", ok, GetLastError());
+
+    // Heartbeat (tag 32, TELEMETRY_TIMER_HEARTBEAT): must advance while the
+    // chip runs (M2 acceptance).
+    memset(&t, 0, sizeof(t));
+    t.tag_id = 32;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
+                 sizeof(t), &info);
+    CHECK(ok, "heartbeat read1 failed, gle=%lu\n", GetLastError());
+    hb1 = t.value;
+    Sleep(1500);
+    memset(&t, 0, sizeof(t));
+    t.tag_id = 32;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
+                 sizeof(t), &info);
+    CHECK(ok, "heartbeat read2 failed, gle=%lu\n", GetLastError());
+    hb2 = t.value;
+    CHECK(hb2 > hb1, "heartbeat not advancing: %u -> %u\n", hb1, hb2);
+    printf("heartbeat: %u -> %u (advancing)\n", hb1, hb2);
+
+    // ARC message round-trip: TEST (0x90) must complete with response
+    // header == 0 (send_arc_message success contract, blackhole.c:539).
+    memset(&m, 0, sizeof(m));
+    m.header = 0x90;   // ARC_MSG_TYPE_TEST
+    m.payload[0] = 0x12345678;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_ARC_MSG, &m, sizeof(m),
+                 sizeof(m), &info);
+    CHECK(ok, "ARC_MSG ioctl failed, gle=%lu\n", GetLastError());
+    CHECK(m.success == 1, "ARC TEST success=%u header=%#x\n", m.success,
+          m.header);
+    CHECK(m.header == 0, "ARC TEST response header=%#x\n", m.header);
+    printf("arc: TEST round-trip ok (response header=0)\n");
+}
+
 int wmain(void)
 {
     WCHAR *list, *path;
@@ -202,6 +289,7 @@ int wmain(void)
     for (path = list; *path; path += wcslen(path) + 1) {
         HANDLE h;
         int isRealDevice = 0;
+        int deviceId = 0;
 
         devices++;
         wprintf(L"\n== %s\n", path);
@@ -214,9 +302,10 @@ int wmain(void)
             continue;
         }
         TestDriverInfo(h);
-        TestDeviceInfo(h, &isRealDevice);
+        TestDeviceInfo(h, &isRealDevice, &deviceId);
         TestQueryMappings(h, isRealDevice);
         TestNegative(h);
+        TestM2Firmware(h, deviceId);
         CloseHandle(h);
     }
 

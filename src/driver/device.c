@@ -11,6 +11,7 @@
 #include <wdmguid.h>
 #include "ttkmd_ioctl.h"
 #include "ttkmd_abi_check.h"
+#include "blackhole.h"
 
 // Ordinal parity with Linux's device numbering (enumerate.c ordinal XArray):
 // monotonically increasing per driver load, used as the interface reference
@@ -62,6 +63,19 @@ TtEvtDeviceAdd(
 
     context = TtGetDeviceContext(device);
     context->Device = device;
+
+    // M2 locks: kernel-TLB access serialization (kernel_tlb_mutex parity)
+    // and the ARC message transaction lock.
+    WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
+    attributes.ParentObject = device;
+    status = WdfWaitLockCreate(&attributes, &context->KernelTlbLock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    status = WdfWaitLockCreate(&attributes, &context->ArcMsgLock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
 
     // Replaces /dev/tenstorrent/N: interface instance per device with the
     // ordinal as reference string (DD-2).
@@ -368,6 +382,10 @@ TtEvtDevicePrepareHardware(
             TtUnmapBlackholeBars(context);
             return status;
         }
+
+        // Telemetry probe is non-fatal, like Linux blackhole_init_hardware:
+        // a device without telemetry still enumerates (blackhole.c:652-653).
+        (VOID)TtBhTelemetryProbe(context);
     }
 
     TraceLoggingWrite(g_TtTraceProvider, "PrepareHardware",

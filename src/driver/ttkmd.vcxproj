@@ -55,6 +55,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalIncludeDirectories>$(ProjectDir)..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- Debug ioctl surface (ttkmd_debug.h). Remove for release/attestation
+           builds: see docs/signing-and-deployment.md. -->
+      <PreprocessorDefinitions>TT_DEBUG_INTERFACES=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Inf>
       <TimeStamp>*</TimeStamp>
@@ -67,12 +70,15 @@
     <ClCompile Include="driver.c" />
     <ClCompile Include="device.c" />
     <ClCompile Include="ioctl.c" />
+    <ClCompile Include="blackhole.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ttkmd.h" />
     <ClInclude Include="trace.h" />
+    <ClInclude Include="blackhole.h" />
     <ClInclude Include="..\include\ttkmd_ioctl.h" />
     <ClInclude Include="..\include\ttkmd_abi_check.h" />
+    <ClInclude Include="..\include\ttkmd_debug.h" />
   </ItemGroup>
   <ItemGroup>
     <Inf Include="ttkmd.inf" />

@@ -21,6 +21,8 @@
 // Blackhole BAR0 kernel-mapping geometry (tt-kmd/blackhole.c:20-46)
 #define TT_BH_TLB_REGS_START    0x1FC00000u  // TLB_REGS_START
 #define TT_BH_TLB_REGS_LEN      0x00001000u  // TLB_REGS_LEN
+#define TT_BH_KERNEL_TLB_INDEX  201u         // KERNEL_TLB_INDEX (last 2M window)
+#define TT_BH_TLB_REG_SIZE      12u          // TLB_REG_SIZE
 #define TT_BH_KERNEL_TLB_START  0x19200000u  // window 201 * 2 MiB (KERNEL_TLB_START)
 #define TT_BH_KERNEL_TLB_LEN    0x00200000u  // one 2 MiB window
 #define TT_BH_NOC2AXI_CFG_START 0x1FD00000u  // NOC2AXI_CFG_START
@@ -63,6 +65,16 @@ typedef struct _TT_DEVICE_CONTEXT {
     volatile UCHAR *KernelTlb;    // BAR0 + KERNEL_TLB_START
     volatile UCHAR *Noc2AxiCfg;   // BAR0 + NOC2AXI_CFG_START
     volatile UCHAR *Bar2Mapping;  // whole BAR2
+
+    // M2: kernel-TLB serialization (kernel_tlb_mutex parity, blackhole.c:243)
+    // and ARC message transaction lock (documented superset of Linux).
+    WDFWAITLOCK KernelTlbLock;
+    WDFWAITLOCK ArcMsgLock;
+
+    // Telemetry tag cache (tt-kmd device.h telemetry_tag_cache parity):
+    // per-tag absolute CSM value address, 0 = tag absent.
+    UINT64 TelemetryTagCache[128];
+    BOOLEAN TelemetryValid;
 } TT_DEVICE_CONTEXT, *PTT_DEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_DEVICE_CONTEXT, TtGetDeviceContext)

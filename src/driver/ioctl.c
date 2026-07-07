@@ -10,6 +10,10 @@
 
 #include <stddef.h>
 #include "ttkmd_ioctl.h"
+#include "blackhole.h"
+#ifdef TT_DEBUG_INTERFACES
+#include "ttkmd_debug.h"
+#endif
 
 // Extracts the Linux ioctl nr (0..16) from a CTL_CODE built by TT_CTL (DD-4);
 // returns 0xFFFFFFFF for foreign codes.
@@ -214,6 +218,89 @@ TtIoctlQueryMappings(
     return STATUS_SUCCESS;
 }
 
+#ifdef TT_DEBUG_INTERFACES
+// Debug surface (ttkmd_debug.h): thin wrappers over the M2 Blackhole layer.
+// Fixed-size in/out, no size negotiation (protocol 3d style).
+
+static NTSTATUS
+TtIoctlDebugReadTelemetry(
+    _In_ PTT_DEVICE_CONTEXT Context,
+    _In_ WDFREQUEST Request
+    )
+{
+    struct tenstorrent_debug_read_telemetry arg;
+    PVOID outBuf;
+    size_t outLen;
+    UINT32 value = 0;
+    NTSTATUS status;
+
+    if (!Context->IsBlackhole || !Context->TelemetryValid) {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    status = TtCopyIn(Request, &arg, sizeof(arg));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (arg.tag_id > MAXUINT16) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = TtBhReadTelemetryTag(Context, (UINT16)arg.tag_id, &value);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    arg.value = value;
+
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(arg), &outBuf,
+                                            &outLen);
+    if (!NT_SUCCESS(status) || outLen < sizeof(arg)) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    RtlCopyMemory(outBuf, &arg, sizeof(arg));
+    WdfRequestSetInformation(Request, sizeof(arg));
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+TtIoctlDebugArcMsg(
+    _In_ PTT_DEVICE_CONTEXT Context,
+    _In_ WDFREQUEST Request
+    )
+{
+    struct tenstorrent_debug_arc_msg arg;
+    TT_ARC_MSG msg;
+    PVOID outBuf;
+    size_t outLen;
+    NTSTATUS status;
+
+    if (!Context->IsBlackhole) {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    status = TtCopyIn(Request, &arg, sizeof(arg));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    msg.Header = arg.header;
+    RtlCopyMemory(msg.Payload, arg.payload, sizeof(msg.Payload));
+
+    arg.success = TtBhSendArcMessage(Context, &msg) ? 1 : 0;
+    arg.header = msg.Header;
+    RtlCopyMemory(arg.payload, msg.Payload, sizeof(arg.payload));
+
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(arg), &outBuf,
+                                            &outLen);
+    if (!NT_SUCCESS(status) || outLen < sizeof(arg)) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    RtlCopyMemory(outBuf, &arg, sizeof(arg));
+    WdfRequestSetInformation(Request, sizeof(arg));
+    return STATUS_SUCCESS;
+}
+#endif // TT_DEBUG_INTERFACES
+
 _Use_decl_annotations_
 VOID
 TtEvtIoDeviceControl(
@@ -254,6 +341,17 @@ TtEvtIoDeviceControl(
         status = STATUS_DEVICE_REMOVED;               // -ENODEV
         goto complete;
     }
+
+#ifdef TT_DEBUG_INTERFACES
+    if (IoControlCode == IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY) {
+        status = TtIoctlDebugReadTelemetry(context, Request);
+        goto complete;
+    }
+    if (IoControlCode == IOCTL_TENSTORRENT_DEBUG_ARC_MSG) {
+        status = TtIoctlDebugArcMsg(context, Request);
+        goto complete;
+    }
+#endif
 
     switch (nr) {
     case 0:
