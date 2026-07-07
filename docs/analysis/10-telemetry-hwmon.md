@@ -15,7 +15,7 @@ Files covered (paths relative to tt-kmd repo root unless prefixed):
 | `device.h` | 127 | entire file (telemetry-related fields) |
 | `enumerate.c` | 545 | entire file (init/cleanup call sites, hwmon stub) |
 | `chardev.c` | (partial) | 40–130 (device registration), 185–310 (reset re-probe path) |
-| `tt-umd/device/api/umd/device/types/telemetry.hpp` | 81 | entire file (cross-reference for the full tag ID space) |
+| `tt-umd/device/api/umd/device/types/telemetry.hpp` | 80 | entire file (cross-reference for the full tag ID space) |
 
 ---
 
