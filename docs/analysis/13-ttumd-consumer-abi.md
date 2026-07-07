@@ -45,7 +45,7 @@ Enumeration is a directory scan of `/dev/tenstorrent/`, keeping entries whose fi
 
 There is **no** udev/by-id lookup; the N in `/dev/tenstorrent/N` is the identity used everywhere ("`N in /dev/tenstorrent/N`", pci_device.hpp:123).
 
-A secondary discovery path exists in `cpuset_lib.cpp`: hwloc PCI enumeration filtered on vendor `0x1e52` (cpuset_lib.hpp:60), then a scan of `/sys/bus/pci/devices/<bdf>/tenstorrent/` for an entry matching regex `tenstorrent!([0-9]+)` to recover the char-dev minor for a given PCI function (cpuset_lib.cpp:108-146). This is used only for hugepage-channel counting and NUMA binding.
+A secondary discovery path exists in `cpuset_lib.cpp`: hwloc PCI enumeration filtered on vendor `0x1e52` (cpuset_lib.hpp:59), then a scan of `/sys/bus/pci/devices/<bdf>/tenstorrent/` for an entry matching regex `tenstorrent!([0-9]+)` to recover the char-dev minor for a given PCI function (cpuset_lib.cpp:108-146). This is used only for hugepage-channel counting and NUMA binding.
 
 ### 1.2 Open flags — the O_APPEND power-mode quirk
 
@@ -62,7 +62,7 @@ static int open_pci_device(const std::string &device_path) {
 }
 ```
 
-`O_APPEND` on the tenstorrent chardev is repurposed by KMD ≥ 2.6 as an *opt-out of legacy power mode*: "Opening the device with O_APPEND opts out of legacy mode, allowing the device to enter low-power idle states when no client holds power flags" (ioctl.h:349-351; also tt_kmd_lib.h:407-408, kmd_versions.hpp:40-42). Enumeration handles (pci_device.cpp:355, 1101) and reset handles (pci_device.cpp:204) *do* pass `O_APPEND`; the long-lived I/O handles currently do not (legacy power semantics).
+`O_APPEND` on the tenstorrent chardev is repurposed by KMD ≥ 2.6 as an *opt-out of legacy power mode*: "Opening the device with O_APPEND opts out of legacy mode, allowing the device to enter low-power idle states when no client holds power flags" (ioctl.h:347-348; also tt_kmd_lib.h:407-408, kmd_versions.hpp:40-41). Enumeration handles (pci_device.cpp:355, 1101) and reset handles (pci_device.cpp:204) *do* pass `O_APPEND`; the long-lived I/O handles currently do not (legacy power semantics).
 
 All opens use `O_CLOEXEC` (pci_device.cpp:355, 381, 1101; tt_kmd_lib.c:71).
 
@@ -135,7 +135,7 @@ Note the post-ioctl loop bound re-reads `mappings.query_mappings.in.output_mappi
 
 ### 2.3 Reset flow
 
-`send_reset_ioctl(device_id, flags)` opens a *fresh* fd with `O_RDWR|O_CLOEXEC|O_APPEND` (pci_device.cpp:200-207), issues `RESET_DEVICE` with the given flags, and the helper closes the fd on success (tt_kmd_lib.c:532-550). The arch-agnostic warm reset sends `RESET_PCIE_LINK`(1) if secondary-bus reset requested, then `ASIC_DMC_RESET`(5) or `ASIC_RESET`(4), sleeps max(2 s, 0.4 s × ndevices), polls for the device to reappear by glob-matching **`/sys/bus/pci/devices/<bdf>/tenstorrent/tenstorrent!*`** and checking `/dev/tenstorrent/<id>` exists (warm_reset.cpp:131-180, 182-239, glob pattern at 142), then sends `POST_RESET`(6) (warm_reset.cpp:237). Reappearance timeout is a named constant `WARM_RESET_DEVICES_REAPPEAR_TIMEOUT` (warm_reset.cpp:132). Legacy Blackhole reset uses `CONFIG_WRITE`(2), polls config-space **command byte bit 1** (read via `/sys/bus/pci/devices/<bdf>/config` offset 4, pci_device.cpp:108-123, 915-935) every 10 ms, then `RESTORE_STATE`(0) (warm_reset.cpp:241-292).
+`send_reset_ioctl(device_id, flags)` opens a *fresh* fd with `O_RDWR|O_CLOEXEC|O_APPEND` (pci_device.cpp:200-207), issues `RESET_DEVICE` with the given flags, and the helper closes the fd on success (tt_kmd_lib.c:532-550). The arch-agnostic warm reset sends `RESET_PCIE_LINK`(1) if secondary-bus reset requested, then `ASIC_DMC_RESET`(5) or `ASIC_RESET`(4), sleeps max(2 s, 0.4 s × ndevices) (or the caller-provided M3 timeout when `reset_m3` is set, warm_reset.cpp:219-221), polls for the device to reappear by glob-matching **`/sys/bus/pci/devices/<bdf>/tenstorrent/tenstorrent!*`** and checking `/dev/tenstorrent/<id>` exists (warm_reset.cpp:131-180, 182-239, glob pattern at 142), then sends `POST_RESET`(6) (warm_reset.cpp:237). Reappearance timeout is a named constant `WARM_RESET_DEVICES_REAPPEAR_TIMEOUT` (warm_reset.cpp:132). Legacy Blackhole reset uses `CONFIG_WRITE`(2), polls config-space **command byte bit 1** (read via `/sys/bus/pci/devices/<bdf>/config` offset 4, pci_device.cpp:108-123, 915-935) every 10 ms, then `RESTORE_STATE`(0) (warm_reset.cpp:241-292).
 
 Cross-process pre/post-reset notification uses Unix-domain sockets `client_<PID>.sock` in a well-known listener directory (warm_reset.cpp:484-708).
 
@@ -217,7 +217,7 @@ Two mutually exclusive sysmem strategies, chosen by `pci_device_->is_iommu_enabl
 
 ### 5.2 IOMMU path
 
-One big anonymous allocation of `num_channels × 1 GiB` (with the WH 4-channel 256 MiB carve-out, silicon_sysmem_manager.cpp:351-359), allocated by `mmap_with_hugepage_fallback`: try `MAP_HUGETLB|MAP_HUGE_1GB`, then `MAP_HUGE_512MB`, then `MAP_HUGE_2MB` (each only if size is a multiple), finally plain pages with a perf warning — all `MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE` (silicon_sysmem_manager.cpp:45-109). The whole region is pinned via one `SysmemBuffer` (`map_buffer_to_noc` or `map_for_dma`), and per-channel `physical_address = iova + ch * 1GiB` (silicon_sysmem_manager.cpp:392-443). "Fake" channel mappings point into this buffer (378-387).
+One big anonymous allocation of `num_channels × 1 GiB` (full size mmapped, silicon_sysmem_manager.cpp:352, 366), allocated by `mmap_with_hugepage_fallback`: try `MAP_HUGETLB|MAP_HUGE_1GB`, then `MAP_HUGE_512MB`, then `MAP_HUGE_2MB` (each only if size is a multiple), finally plain pages with a perf warning — all `MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE` (silicon_sysmem_manager.cpp:45-109). The region is pinned via one `SysmemBuffer` (`map_buffer_to_noc` or `map_for_dma`) using `iommu_mapping_size` — for WH with 4 channels this is the full size minus the 256 MiB carve-out (silicon_sysmem_manager.cpp:351-359, 400) — and per-channel `physical_address = iova + ch * 1GiB` (silicon_sysmem_manager.cpp:392-443). "Fake" channel mappings point into this buffer (378-387).
 
 > **Porting note:** Windows has no hugetlbfs; the equivalent is `VirtualAlloc(MEM_LARGE_PAGES)` (2 MiB, and 1 GiB where supported with `SeLockMemoryPrivilege`) or, more robustly, letting the KMD allocate contiguous/remapped common buffers. The *contract* the port must keep is: (1) each channel is 1 GiB of host memory visible to the device at `pcie_base + ch*1GiB` NOC address, (2) WH channel 3 is limited to 768 MiB, (3) cross-process sharing of channel 0's legacy file name is a Linux-ism that likely need not be preserved. The `nr_hugepages`-based channel count computation must be replaced with a policy suited to the Windows allocator.
 
@@ -291,7 +291,7 @@ tt-umd does **not** use the KMD's `LOCK_CTL` resource locks (defined ioctl.h:26,
 
 Lock names (lock_manager.cpp:20-23): `<TYPE>_<device_id>_<devtype>`, e.g. `TT_UMD_LOCK.PCIE_DMA_0_PCIe`. Types: `ARC_MSG`, `REMOTE_ARC_MSG`, `NON_MMIO`, `MEM_BARRIER`, `CREATE_ETH_MAP`, `CHIP_IN_USE`, `PCIE_DMA` (lock_manager.hpp:18-33, 43-51). `CHIP_IN_USE` is held for the whole `start_device`…`close_device` interval (local_chip.cpp:146, 171); `MEM_BARRIER` makes host↔device barriers atomic across processes (local_chip.cpp:438-443); `PCIE_DMA` serializes bounce-buffer DMA across processes (tt_device.cpp:755-756).
 
-> **Porting note:** all of this maps cleanly to Windows named mutexes (`Global\` namespace), which are inherently robust (`WAIT_ABANDONED` ≈ `EOWNERDEAD`). What must be preserved is the *naming discipline keyed on the OS-level device id* so独立 processes agree, and the CHIP_IN_USE / PCIE_DMA / MEM_BARRIER semantics. The KMD itself needs no lock support (LOCK_CTL can be left unimplemented for tt-umd's sake).
+> **Porting note:** all of this maps cleanly to Windows named mutexes (`Global\` namespace), which are inherently robust (`WAIT_ABANDONED` ≈ `EOWNERDEAD`). What must be preserved is the *naming discipline keyed on the OS-level device id* so independent processes agree, and the CHIP_IN_USE / PCIE_DMA / MEM_BARRIER semantics. The KMD itself needs no lock support (LOCK_CTL can be left unimplemented for tt-umd's sake).
 
 ### 9.2 Threading assumptions on the fd
 
@@ -305,9 +305,9 @@ Lock names (lock_manager.cpp:20-23): `<TYPE>_<device_id>_<devtype>`, e.g. `TT_UM
 - **SIGBUS:** UMD optionally installs a process-wide `SIGBUS` handler with `sigsetjmp/siglongjmp` recovery so that MMIO to a dead/hot-reset device throws `SigbusError` instead of killing the process; without an active jump point the handler `_exit(sig)`s (silicon_tlb_window.cpp:29-67, 273-283). This is the mechanism behind the `safe_*` I/O API.
 - **exec:** every fd is `O_CLOEXEC`; nothing is intended to be inherited.
 - **fork:** no special handling; correctness across fork relies on KMD per-fd semantics plus the shm robust mutexes.
-- **Crash cleanup relied upon from the KMD:** on fd close/process exit the driver must release: pinned pages, TLB windows, DMA buffers ("That only happens when we close the fd", pci_device.cpp:984-985), power-flag contributions ("When the file descriptor is closed, its contribution is removed", ioctl.h:342-344), and NOC-aperture reservations (the "stale or crashed process holds sysmem NOC address space" recovery advice presumes the aperture frees when the stale process dies — silicon_sysmem_manager.cpp:303-310, 413-424). `SET_NOC_CLEANUP` (fd-close NOC write, ioctl.h:308-337) exists for device-side cleanup but tt-umd never registers one.
+- **Crash cleanup relied upon from the KMD:** on fd close/process exit the driver must release: pinned pages, TLB windows, DMA buffers ("That only happens when we close the fd", pci_device.cpp:984-985), power-flag contributions ("When the file descriptor is closed, its contribution is removed", ioctl.h:345), and NOC-aperture reservations (the "stale or crashed process holds sysmem NOC address space" recovery advice presumes the aperture frees when the stale process dies — silicon_sysmem_manager.cpp:303-310, 413-424). `SET_NOC_CLEANUP` (fd-close NOC write, ioctl.h:308-337) exists for device-side cleanup but tt-umd never registers one.
 
-> **Porting note:** SIGBUS-on-MMIO-failure has no direct analogue; on Windows, accesses to a mapped BAR of a removed device typically produce an access violation once the mapping is torn down, catchable via SEH (`__try/__except`) — the `safe_*` API should be ported onto SEH, and the KMD should invalidate user mappings on surprise removal rather than letting reads return all-FFs silently (UMD's hang detectors *also* rely on all-FF reads: blackhole_tt_device.cpp:340 masks `bar_read32(...) & 0x3F`).
+> **Porting note:** SIGBUS-on-MMIO-failure has no direct analogue; on Windows, accesses to a mapped BAR of a removed device typically produce an access violation once the mapping is torn down, catchable via SEH (`__try/__except`) — the `safe_*` API should be ported onto SEH, and the KMD should invalidate user mappings on surprise removal rather than letting reads return all-FFs silently (UMD's hang detectors *also* rely on all-FF reads: `HANG_READ_VALUE = 0xFFFFFFFF`, architecture_implementation.hpp:29, compared in hang_detector.cpp:38-46; e.g. blackhole_tt_device.cpp:340 masks `bar_read32(...) & 0x3F`).
 
 ---
 
@@ -347,7 +347,7 @@ Lock names (lock_manager.cpp:20-23): `<TYPE>_<device_id>_<devtype>`, e.g. `TT_UM
 | Hugetlbfs mount point expected | `/dev/hugepages-1G` | hugepage.cpp:29 |
 | DMA bounce buffer | 512 KiB initial, halved to ≥1 page; +1 completion page | pci_device.cpp:1018-1035, 939, 966 |
 | `TENSTORRENT_MAX_DMA_BUFS` / `MAX_INBOUND_TLBS` | 256 / 256 | ioctl.h:44-45 |
-| PCI IDs | vendor 0x1e52; WH device 0x401e; BH 0xb140 | cpuset_lib.hpp:60; pci_ids.h:13-14 |
+| PCI IDs | vendor 0x1e52; WH device 0x401e; BH 0xb140 | cpuset_lib.hpp:59; pci_ids.h:13-14 |
 | Shm mutex prefix / init flag | `TT_UMD_LOCK.` / `0x5454554d444d5458` | robust_mutex.hpp:31; robust_mutex.cpp:46 |
 | WH B0 required PCI revision | 0x01 (assert) | pci_device.cpp:440-441 |
 

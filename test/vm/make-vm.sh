@@ -11,8 +11,8 @@ DISK_SIZE=60G
 MEM=8192
 SMP=8
 SSH_PORT=2222
-OVMF_CODE=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)
-OVMF_VARS_SRC=$(ls /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd 2>/dev/null | head -1)
+OVMF_CODE=$({ ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null || true; } | head -1)
+OVMF_VARS_SRC=$({ ls /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd 2>/dev/null || true; } | head -1)
 
 [ -f "$WIN_ISO" ] || { echo "Windows ISO not found: $WIN_ISO" >&2; exit 1; }
 [ -n "$OVMF_CODE" ] || { echo "OVMF not installed (sudo apt-get install ovmf)" >&2; exit 1; }

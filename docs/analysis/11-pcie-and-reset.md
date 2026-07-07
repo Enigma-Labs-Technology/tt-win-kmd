@@ -18,7 +18,7 @@ Files read in full (line counts from the baseline tree, tag `ttkmd-2.10.0-rc1-1-
 | `device.h` | 127 | reset-related fields of `struct tenstorrent_device` |
 | `chardev_private.h` | 82 | `open_reset_gen` |
 | `memory.c` | 1742 | `tenstorrent_vma_zap`, dmabuf-export revoke/query (memory.c:1281-1326, 1677-1742), VMA ops (memory.c:1370-1439) |
-| `tools/reset.c` (tt-kmd) | 295 | reference userspace consumer of ASIC_RESET/POST_RESET |
+| `tools/reset.c` (tt-kmd) | 294 | reference userspace consumer of ASIC_RESET/POST_RESET |
 | `tt-umd/device/warm_reset.cpp` | 710 | reference userspace reset orchestration |
 | `tt-umd/device/pcie/pci_device.cpp` | (relevant parts) | how UMD issues the reset ioctl |
 
@@ -171,7 +171,7 @@ There is **no FLR anywhere in the driver** (no `pcie_flr`/`pci_reset_function` c
 pci_write_config_dword(pdev, INTERFACE_TIMER_TARGET_OFF, INTERFACE_TIMER_TARGET);
 pci_write_config_dword(pdev, INTERFACE_TIMER_CONTROL_OFF, INTERFACE_TIMER_EN | INTERFACE_FORCE_PENDING);
 ```
-(pcie.c:16-22, 133-138). Two dword writes into the device's own extended config space (Synopsys DWC PCIe controller "interface timer" registers): write `0x1` to offset 0x934, then `0x11` to offset 0x930. This forces a pending timer interrupt inside the chip, which firmware services as a reset request. Always returns true. Used by legacy `CONFIG_WRITE` (chardev.c:253) and by Blackhole `ASIC_RESET` (blackhole.c:566).
+(pcie.c:17-22, 133-138). Two dword writes into the device's own extended config space (Synopsys DWC PCIe controller "interface timer" registers): write `0x1` to offset 0x934, then `0x11` to offset 0x930. This forces a pending timer interrupt inside the chip, which firmware services as a reset request. Always returns true. Used by legacy `CONFIG_WRITE` (chardev.c:253) and by Blackhole `ASIC_RESET` (blackhole.c:566).
 
 ### 3.5 Reset marker (pcie.c:140-158)
 
@@ -240,7 +240,7 @@ No hardware reset is performed by the driver — the *user* performs the reset b
 
 Same wrapper as 4.5 (bump gen, zap, `dev_class->reset`, `needs_hw_init = true`).
 
-**Wormhole**: identical to 4.5 except `reset_arg = 3` ("ASIC + M3 reset") passed to `WH_FW_MSG_TRIGGER_RESET` (wormhole.c:477, 510-511).
+**Wormhole**: identical to 4.5 except `reset_arg = 3` passed to `WH_FW_MSG_TRIGGER_RESET` (wormhole.c:477, 510-511); the "ASIC + M3 reset" meaning of argument 3 is documented in blackhole.c:549 for the same firmware argument.
 
 **Blackhole** (blackhole.c:547-563): via the ARC message queue (not scratch registers):
 1. Send `ARC_MSG_TYPE_TEST` (0x90) to confirm FW/NOC alive; on failure log "Couldn't communicate with firmware; NOC is likely hung." and return false (blackhole.c:551-555).
@@ -251,7 +251,7 @@ Same wrapper as 4.5 (bump gen, zap, `dev_class->reset`, `needs_hw_init = true`).
 
 This is the narrow "post-reset fd" exception. Exact semantics:
 
-**Who may call it, on which fd.** Any fd of the device that passes the standard gate: device not `detached`, and `open_reset_gen == reset_gen` (chardev.c:604-613). Because the destructive flavors bump the generation, that means exactly two kinds of fd: (a) **the resetter's own fd** (carried forward by `bump_reset_gen`), or (b) **any fd opened after the reset ioctl returned**. It is reachable during the reset window because `RESET_DEVICE` is on the `needs_hw_init` allowlist (chardev.c:616-624), and it is exempt from the dmabuf `-EBUSY` gate (chardev.c:231-232). No capability/ownership check beyond that — any process that can open the node can complete a reset. In practice both reference consumers open a **fresh fd** (UMD: `tt_device_open(..., O_RDWR|O_CLOEXEC|O_APPEND)` per reset call, tt-umd/device/pcie/pci_device.cpp:200-215; tools/reset.c re-finds the device by BDF after it re-enumerates and opens the new node, tools/reset.c:260-289).
+**Who may call it, on which fd.** Any fd of the device that passes the standard gate: device not `detached`, and `open_reset_gen == reset_gen` (chardev.c:604-613). Because the flavors that enter the reset window (USER_RESET/ASIC_RESET/ASIC_DMC_RESET, and legacy CONFIG_WRITE) bump the generation, that means exactly two kinds of fd: (a) **the resetter's own fd** (carried forward by `bump_reset_gen`), or (b) **any fd opened after the reset ioctl returned**. It is reachable during the reset window because `RESET_DEVICE` is on the `needs_hw_init` allowlist (chardev.c:616-624), and it is exempt from the dmabuf `-EBUSY` gate (chardev.c:231-232). No capability/ownership check beyond that — any process that can open the node can complete a reset. In practice both reference consumers open a **fresh fd** (UMD: `tt_device_open(..., O_RDWR|O_CLOEXEC|O_APPEND)` per reset call, tt-umd/device/pcie/pci_device.cpp:200-215; tools/reset.c re-finds the device by BDF after it re-enumerates and opens the new node, tools/reset.c:260-289).
 
 **What it does** (chardev.c:269-287):
 
@@ -294,7 +294,7 @@ From tt-umd/device/warm_reset.cpp:182-239 and tools/reset.c:196-289:
 ## 5. Effects on other open fds, mmaps, locks, power
 
 - **Other fds:** after a gen bump, every ioctl and mmap on a pre-reset fd returns `-ENODEV` forever (chardev.c:609-613, 726-729). Blocking lock waiters are woken and return `-ENODEV` (chardev.c:295-299, 353-360). `close()` still works and performs full cleanup (`tt_cdev_release`, chardev.c:922-958) — NOC cleanup write is skipped only when `detached` (chardev.c:869), power re-aggregation is skipped when `detached || needs_hw_init` (chardev.c:907-908), and aggregation itself skips stale-generation fds (chardev.c:493-495).
-- **Mappings:** `tenstorrent_vma_zap` walks every open fd's `vma_list` under `chardev_mutex` + per-fd `vma_lock`, takes `mmget_not_zero`/`mmap_read_lock` in the VFIO-derived ordering, and `zap_special_vma_range()`s each BAR/TLB VMA (memory.c:1677-1742). The BAR/TLB vm_ops have **no `.fault` handler** (memory.c:1436-1439, 1484-1486), so a post-zap access faults fatally (SIGBUS) rather than re-populating. DMA-buffer mmaps (`dma_mmap_coherent`) are not on `vma_list` and are not zapped.
+- **Mappings:** `tenstorrent_vma_zap` walks every open fd's `vma_list` under `chardev_mutex` + per-fd `vma_lock`, takes `mmget_not_zero`/`mmap_read_lock` in the VFIO-derived ordering, and `zap_special_vma_range()`s each BAR/TLB VMA (memory.c:1677-1742). The BAR/TLB vm_ops have **no `.fault` handler** (memory.c:1436-1439, 1484-1492), so a post-zap access faults fatally (SIGBUS) rather than re-populating. DMA-buffer mmaps (`dma_mmap_coherent`) are not on `vma_list` and are not zapped.
 - **Resource locks:** survive reset — device-global bits are *not* cleared by reset. A pre-reset holder can no longer release via ioctl (its fd is invalid); only `close(fd)` clears its bits (comment chardev.c:312-316, cleanup chardev.c:877-885).
 - **Power:** the deferred idle-powerdown work is drained before the reset (chardev.c:238); new arms cannot race in because open/release hold the rwsem shared (comment chardev.c:236-237).
 
@@ -352,7 +352,7 @@ Failure of the message send or exhaustion of retries returns false — but note 
 
 ## 9. Reboot notifier, shutdown, suspend/resume, remove
 
-- **Reboot notifier** (enumerate.c:243-251): registered at probe only when the class has a `.reboot` op (enumerate.c:377-380) — Wormhole only (`.reboot = wormhole_cleanup_hardware`, wormhole.c:1073; Blackhole registers none, blackhole.c:813-840). Handler: `if (action != SYS_POWER_OFF) tt_dev->dev_class->reboot(tt_dev);` → on restart/halt (but *not* power-off) send WH FW `ASTATE3` (0xA3) with 10 000 µs timeout, skipped if hardware hung (`wormhole_shutdown_firmware`, wormhole.c:293-301). Unregistered at final kref release (enumerate.c:487-488).
+- **Reboot notifier** (enumerate.c:243-251): registered at probe only when the class has a `.reboot` op (enumerate.c:377-380) — Wormhole only (`.reboot = wormhole_cleanup_hardware`, wormhole.c:1073; Blackhole registers none, blackhole.c:813-840). Handler: `if (action != SYS_POWER_OFF) tt_dev->dev_class->reboot(tt_dev);` → on restart/halt (but *not* power-off) send WH FW `ASTATE3` (0xA3) with 10 000 µs timeout, skipped if hardware hung (`wormhole_shutdown_firmware`, wormhole.c:293-301) and skipped entirely when `detached` (`wormhole_cleanup_hardware` guard, wormhole.c:789-790). Unregistered at final kref release (enumerate.c:487-488).
 - **`.shutdown = tenstorrent_pci_remove`** (enumerate.c:532): system shutdown runs the full remove path.
 - **Remove** (enumerate.c:404-481), reset-relevant ordering: cancel WH fw_ready work; set `detached = true` under `chardev_mutex`; drain `power_down_work`; probe vendor ID and call `cleanup_hardware` (FW → A3) only if it reads != 0xFFFF (hotplug-gone check, enumerate.c:432-434); `cleanup_telemetry`; **`down_write(&reset_rwsem)`; `tenstorrent_vma_zap`; `cleanup_device` (unmap BARs); `up_write`** (enumerate.c:444-447); `tenstorrent_revoke_tlb_dmabufs` (must stay after the drain — long ordering comment enumerate.c:449-458); wake lock waiters; per-fd `tenstorrent_memory_cleanup`; unregister cdev; disable interrupts/device.
 - **Suspend** (enumerate.c:499-509): drain powerdown work, `tenstorrent_revoke_tlb_dmabufs`, `cleanup_hardware` (FW → A3). **Resume** (enumerate.c:511-522): `init_hardware`; on success `pci_save_state(pdev)` ("Suspend invalidates the saved state"); returns `-EIO` on failure. Resume does **not** bump `reset_gen` — fds survive suspend/resume.

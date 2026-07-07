@@ -10,7 +10,7 @@ Files covered (full reads unless noted):
 - `wormhole.c` — constants (74-121), CSM accessors + `wh_arc_addr_to_sysreg` (140-161), the *separate* scratch-register protocol `arc_msg_poll_completion` / `wormhole_send_arc_fw_message[_with_args]` (163-240), the queue-based `send_arc_message` (242-291), `wormhole_set_power_state` (1034-1053), class table (1055-1084).
 - `telemetry.c` (232 lines) — **read in full; contains NO msgqueue call sites.** It reads telemetry via `read_telemetry_tag` (a CSM read on the tag cache), never through the ARC message queue. Included here only to record that fact.
 - `telemetry.h:73-78` — `ARC_CSM_BASE`/`ARC_CSM_SIZE`/`is_range_within_csm` (the address gate shared by both arch CSM accessors).
-- `device.h:110-114` — the `csm_read32`/`csm_write32` function-pointer contract.
+- `device.h:110-111` — the `csm_read32`/`csm_write32` function-pointer contract.
 - `ioctl.h:396-411` — `struct tenstorrent_power_state` (payload source for the POWER_SETTING message).
 
 `msgqueue.c` is architecture-agnostic: it never touches hardware directly. All device I/O goes through the `csm_read32`/`csm_write32` ops installed by the arch class (`blackhole.c:837-838`, `wormhole.c:1080-1081`).
@@ -44,7 +44,7 @@ Ownership split (who advances each pointer):
 - **Driver owns** `REQ_WPTR` (0x00) and `RES_RPTR` (0x04) — the two "host side" indices, packed into the first 8 bytes.
 - **Firmware owns** `REQ_RPTR` (0x10) and `RES_WPTR` (0x14) — the two "ARC side" indices, packed 16 bytes away.
 
-Offsets 0x08, 0x0C, 0x18, 0x1C are inside the 32-byte header but are **never read or written by the driver** (reserved / FW-private). The 16-byte gap between the host pair (0x00/0x04) and the FW pair (0x10/0x14) reads as deliberate cache-line separation between the host and the ARC core.
+Offsets 0x08, 0x0C, 0x18, 0x1C are inside the 32-byte header but are **never read or written by the driver** (reserved / FW-private). The 8-byte gap between the host pair (0x00/0x04) and the FW pair (starting 16 bytes from base at 0x10/0x14) reads as deliberate separation between the host and the ARC core.
 
 ### 1.3 Full queue image in CSM
 
@@ -269,13 +269,14 @@ Two additional (non-queue) hang gates exist in the wrappers:
 
 ### 8.3 Locking around transactions
 `send_arc_message` takes no lock spanning the push/doorbell/pop. Serialization comes from higher layers:
-- Power-setting path runs under `tt_dev->chardev_mutex` (`chardev.c:540-542` → `tenstorrent_set_aggregated_power_state`).
-- Reset / `init_hardware` / `cleanup_hardware` paths run under `reset_rwsem` held **exclusive** in the reset ioctl (`chardev.c:236-238` and the reset block at `:240-290`).
+- All aggregated power-setting sends funnel through `tenstorrent_set_aggregated_power_state[_locked]` under `tt_dev->chardev_mutex` (`chardev.c:540-542`; `lockdep_assert_held` at `:484`). The ioctl, open, and release callers additionally hold `reset_rwsem` **shared** for the duration (`chardev.c:601`, `:838`, `:929`), so they are mutually excluded from the reset ioctl.
+- Reset / `init_hardware` paths run under `reset_rwsem` held **exclusive** in the reset ioctl (`chardev.c:598-599`; comment at `:236-238`; the reset block at `:240-290`). `cleanup_hardware` is **not** called from the reset ioctl: it runs from the suspend path (`enumerate.c:506`) and the PCI-remove path (`enumerate.c:434`).
+- The deferred `power_down_work` handler (`chardev.c:553-560`) sends power-setting messages under `chardev_mutex` but **without** `reset_rwsem`; the reset ioctl drains it with `cancel_delayed_work_sync` before disturbing the device (`chardev.c:238`), and re-arming happens only while `reset_rwsem` is held shared (`chardev.c:917` inside the release path), so it cannot overlap the reset ioctl either.
 
-These are **different locks**, so a power-setting message and a reset/init message are not mutually excluded by a single lock. Whether they can actually overlap on the same device is left open (see Open Questions).
+The suspend-path `cleanup_hardware` send (`enumerate.c:506`) is the ARC transaction with no lock against a concurrent power-setting send (see Open Questions).
 
 ### 8.4 Cleanup at fd close / removal
-The queue itself holds no per-fd state — it is stateless device memory. At fd close the aggregated power state may be recomputed and a fresh POWER_SETTING message sent (`chardev.c` release path); at device removal `blackhole_cleanup_hardware` sends ASTATE3 unless `detached`. There is no queue teardown to perform.
+The queue itself holds no per-fd state — it is stateless device memory. At fd close the aggregated power state may be recomputed and a fresh POWER_SETTING message sent (`chardev.c` release path); `blackhole_cleanup_hardware` sends ASTATE3 from the suspend path (`enumerate.c:506`). On the PCI-remove path it is also invoked (`enumerate.c:434`), but `detached` is set earlier in remove (`enumerate.c:424`), so its `if (tt_dev->detached) return;` guard skips the ASTATE3 send there. There is no queue teardown to perform.
 
 ---
 
@@ -308,14 +309,16 @@ These travel through Scratch Register 5, not `msgqueue.c`. Included for complete
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `WH_FW_MESSAGE_PRESENT` | `0xAA00` | OR'd with `message_id`, written to SR5 (`SCRATCH_REG(5)` = BAR4 off 0x74) to post a message (`:112,220`) |
-| `WH_FW_MSG_ASTATE0` | `0xA0` | A0 state (defined; declared but not sent in these files) |
+| `WH_FW_MESSAGE_PRESENT` | `0xAA00` | OR'd with `message_id`, written to SR5 (`SCRATCH_REG(5)` = reset-unit offset 0x74, i.e. BAR4 off 0x1F30074) to post a message (`:112,220`) |
+| `WH_FW_MSG_ASTATE0` | `0xA0` | A0 state; sent by `wormhole_init_hardware` with 10 000 µs timeout (`:725`) |
 | `WH_FW_MSG_ASTATE3` | `0xA3` | A3 state; sent by `wormhole_shutdown_firmware` with 10 000 µs timeout (`:298`) |
-| `WH_FW_MSG_CURR_DATE` | `0xB7` | Current date/time to FW (used by date-setting path elsewhere) |
+| `WH_FW_MSG_CURR_DATE` | `0xB7` | Current date/time to FW; sent by `wormhole_send_curr_date` (`:358`) |
+
+This table is not the complete SR5 traffic: the driver also sends `WH_FW_MSG_NOP` `0x11` (`:43`; liveness probes in `wormhole_reset`, `:481,497`), `WH_FW_MSG_TRIGGER_RESET` `0x56` (`:42`; `wormhole_reset`, `:510`), `WH_FW_MSG_PCIE_INDEX` `0x51` (`:39`; `update_device_index`, `:467`), `WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT` `0xBC` (`:41`; `wormhole_init_hardware`, `:729`), and `FW_MSG_PCIE_RETRAIN` `0xB6` (`pcie.c:16,112`) — all over SR5, none over the CSM queue.
 
 Protocol (`wormhole.c:108-112, 205-234`): write args to `SCRATCH_REG(3)` (off 0x6C), write `0xAA00 | id` to `SCRATCH_REG(5)`, pulse IRQ0 via `ARC_MISC_CNTL_REG`, then `arc_msg_poll_completion` waits for the low 16 bits of SR5 to equal `message_id`; the high 16 bits become `*exit_code`.
 
-### 9.3 POWER_SETTING header/payload packing (both arches)
+### 9.4 POWER_SETTING header/payload packing (both arches)
 ```c
 msg.header = ARC_MSG_TYPE_POWER_SETTING | (validity << 8) | (power_flags << 16);
 BUILD_BUG_ON(sizeof(power_state->power_settings) != sizeof(msg.payload));   // 14*u16 == 7*u32 == 28
@@ -371,7 +374,7 @@ memcpy(msg.payload, power_state->power_settings, sizeof(msg.payload));
 
 1. **Power-of-two `num_entries` requirement.** The occupancy math `(wptr - rptr) % (2*num_entries)` on unsigned `u32` is only correct across wrap when `2*num_entries` divides `2^32`, i.e. `num_entries` is a power of two. The driver reads `num_entries = queue_info & 0xFF` from the QCB and never validates it. Is the FW contract that `num_entries` is always a power of two? If not, occupancy is miscomputed after a wptr wrap and the queue can wedge or corrupt. A Windows port must either preserve the identical wrap-then-modulo behavior or add validation.
 
-2. **Transaction serialization across locks.** `send_arc_message` (push → doorbell → pop) holds no lock spanning the transaction. The power-setting caller path is serialized by `chardev_mutex` while reset/init/cleanup callers are serialized by `reset_rwsem` (exclusive). Because these are different locks, can a POWER_SETTING transaction and a reset/init ARC transaction interleave their push/pop on the same device, corrupting the single-outstanding-message assumption? Confirm whether a higher-level invariant prevents this, or whether the port needs an explicit per-device "ARC message" mutex.
+2. **Transaction serialization across locks.** `send_arc_message` (push → doorbell → pop) holds no lock spanning the transaction. Power-setting sends are serialized among themselves by `chardev_mutex` and against the reset ioctl by `reset_rwsem` (shared vs exclusive — see §8.3), so the ioctl/open/release/deferred-work power paths cannot interleave with reset/init. The remaining exposure is the suspend-path `cleanup_hardware` ASTATE3 send (`enumerate.c:506`), which holds neither `chardev_mutex` nor `reset_rwsem`; it presumably relies on the PM core freezing userspace before suspend callbacks run. Confirm that invariant, or give the port an explicit per-device "ARC message" mutex.
 
 3. **Meaning of the upper 24 bits of `queue_info`.** Only bits 0-7 (`num_entries`) are consumed. Whether the remaining bits encode entry size, version, or flags is unknown; the driver hardcodes a 32-byte entry stride. If a future FW changes entry size via those bits, the port would silently mis-stride.
 

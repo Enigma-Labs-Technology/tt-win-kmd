@@ -299,7 +299,7 @@ Combined: in @0, out @4, total 16 bytes.
 
 **Validation/errors/concurrency:** identical shape to ioctl 0: only `-EFAULT`/`-ENODEV`; no locks; allowed during `needs_hw_init` (chardev.c:618). Stateless.
 
-tt-umd gates features on this (kmd_versions.hpp; pci_device.cpp:158).
+**[UNVERIFIED]** tt-umd gates features on this (kmd_versions.hpp; pci_device.cpp:158). GET_DRIVER_INFO is not called in pci_device.cpp; the driver version is fetched via `tt_driver_get_attr(TT_DRIVER_API_VERSION)` (pci_device.cpp:430) through the `tt_device_t` abstraction, so the `:158` citation (a `}`) does not back this claim.
 
 ## Ioctl 6 — TENSTORRENT_IOCTL_RESET_DEVICE (cmd 0xFA06)
 
@@ -343,7 +343,7 @@ Combined: in @0, out @8, total 16.
 
 **Concurrency:** exclusive `reset_rwsem`; `dmabuf_export_lock` briefly; blocking on `cancel_delayed_work_sync` and (flag 1) up to ~10.5 s of sleeps in the PCIe hot reset path.
 
-Used by tt-umd (pci_device.cpp mention at :545 and its ioctl.h).
+**[UNVERIFIED]** Used by tt-umd (pci_device.cpp mention at :545 and its ioctl.h). Line 545 is blank; tt-umd issues reset via `send_reset_ioctl`/`tt_device_reset` (pci_device.cpp:200-215, called at 905), not a raw ioctl at `:545`.
 
 ## Ioctl 7 — TENSTORRENT_IOCTL_PIN_PAGES (cmd 0xFA07)
 
@@ -494,7 +494,7 @@ Handler: `ioctl_allocate_tlb` (memory.c:893-944) → `tenstorrent_device_allocat
 
 **Window inventory** (needed to interpret `size`):
 - Wormhole (all BAR0): 156 x 1 MiB, 10 x 2 MiB, 20 x 16 MiB (wormhole.c:20-33, 1061-1063); window 185 (the last 16 MiB) is reserved for the kernel at init (`set_bit(KERNEL_TLB_INDEX, tt_dev->tlbs)`, wormhole.c:87, 702).
-- Blackhole: 202 x 2 MiB in BAR0 and up to 8 x 4 GiB in BAR4 — 4G count is trimmed to `bar4_len / 4GiB` at probe (blackhole.c:20-31, 580, 820-821); 2 MiB window 201 is kernel-reserved (blackhole.c:40, 610).
+- Blackhole: 202 x 2 MiB in BAR0 and up to 8 x 4 GiB in BAR4 — 4G count is trimmed to `bar4_len / 4GiB` at probe (blackhole.c:20-31, 580, 820-821); 2 MiB window 201 is kernel-reserved (blackhole.c:40, 609).
 
 **Validation & allocation:** `dev_class->describe_tlb == NULL` → `-EINVAL` (memory.c:902-903). `tenstorrent_device_allocate_tlb`: no kind with `tlb_size == size` → `-EINVAL`; scan that kind's bit range in `tt_dev->tlbs` with `find_next_zero_bit` + `test_and_set_bit`; all busy → `-ENOMEM`; on repeated races, `cond_resched()` and `-ERESTARTSYS` if a signal is pending (tlb.c:20-50). On claim, `refcount_set(&tt_dev->tlb_refcount[id], 1)` (tlb.c:43). Then `describe_tlb` failure or a window in a BAR other than 0/4 frees the window and returns `-EINVAL` (memory.c:913-922). `copy_to_user` failure frees the window, `-EFAULT` (memory.c:936-939). Success: `set_bit(id, priv->tlbs)` — **no `priv->mutex` held**; the bit op itself is atomic (memory.c:941).
 
@@ -502,7 +502,7 @@ Handler: `ioctl_allocate_tlb` (memory.c:893-944) → `tenstorrent_device_allocat
 
 **Side effects / lifetime:** window id is a per-device resource owned by this fd; freed by FREE_TLB, or at close via `tt_cdev_release_tlbs` (chardev.c:887-892), except a dma-buf export keeps the underlying window allocated via `tlb_refcount` (tlb.c:71-79). The returned mmap offsets are consumed by `mmap` (`map_tlb_window`, memory.c:1494-1583; requires ownership, `-EPERM` otherwise).
 
-Used by tt-umd (pci_device.cpp:417).
+**[UNVERIFIED]** Used by tt-umd (pci_device.cpp:417). Line 417 is unrelated (`if (ret_code != 0)`); TLB allocation goes through `PCIDevice::allocate_tlb` (pci_device.cpp:820) / `SiliconTlbHandle`, and the raw `TENSTORRENT_IOCTL_ALLOCATE_TLB` does not appear in pci_device.cpp.
 
 ## Ioctl 12 — TENSTORRENT_IOCTL_FREE_TLB (cmd 0xFA0C)
 
@@ -514,7 +514,7 @@ Handler: `ioctl_free_tlb` (memory.c:946-982) → `tenstorrent_device_free_tlb` (
 
 **Errors:** `-EFAULT`, `-EINVAL`, `-EPERM`, `-EBUSY`. **Concurrency:** `priv->mutex` + `priv->vma_lock`. **Lifetime:** same freeing runs per set bit at close (without the VMA check — VMAs are already gone or being torn down by then, chardev.c:887-892).
 
-Used by tt-umd (pci_device.cpp:432, 455).
+**[UNVERIFIED]** Used by tt-umd (pci_device.cpp:432, 455). Neither line contains a FREE_TLB call (`log_debug(` and a comment); `TENSTORRENT_IOCTL_FREE_TLB` does not appear anywhere in the tt-umd sources checked out here (freeing is handled inside the `TlbHandle`/`tt_device_t` abstraction).
 
 ## Ioctl 13 — TENSTORRENT_IOCTL_CONFIGURE_TLB (cmd 0xFA0D)
 
@@ -547,7 +547,7 @@ Handler: `ioctl_configure_tlb` (memory.c:984-999) → `tenstorrent_device_config
 
 **Errors:** `-EFAULT`, `-EINVAL`, `-EPERM`. **Concurrency:** none beyond `reset_rwsem` shared — the ownership test and the MMIO writes race against concurrent FREE_TLB/close by design (see Open questions). **Side effects:** reprograms the window's NOC routing registers; persistent until reconfigured or device reset. Configuration is not restored after reset.
 
-Used by tt-umd (pci_device.cpp:492, 511).
+**[UNVERIFIED]** Used by tt-umd (pci_device.cpp:492, 511). Those lines are unrelated (`LogUMD,` and `if (bar0 == MAP_FAILED)`); configuration goes through `PCIDevice::configure_tlb` (pci_device.cpp:845), and the raw `TENSTORRENT_IOCTL_CONFIGURE_TLB` does not appear in pci_device.cpp.
 
 ## Ioctl 14 — TENSTORRENT_IOCTL_SET_NOC_CLEANUP (cmd 0xFA0E)
 
@@ -572,7 +572,7 @@ Handler: `ioctl_set_noc_cleanup` (chardev.c:432-476). Protocol §3c (argsz; inpu
 
 **Errors:** `-EOPNOTSUPP`, `-EFAULT`, `-EINVAL`. **Reset interaction:** the fire at close is skipped only when `detached`; a post-reset stale fd still fires its write at close (device bit-state permitting).
 
-Present in tt-umd's vendored header; call sites exist in tt-umd (pci_device.cpp:309 area per grep).
+Present in tt-umd's vendored header; **[UNVERIFIED]** call sites exist in tt-umd (pci_device.cpp:309 area per grep). `TENSTORRENT_IOCTL_SET_NOC_CLEANUP` does not appear anywhere in the tt-umd sources checked out here, so this call-site claim is unsupported.
 
 ## Ioctl 15 — TENSTORRENT_IOCTL_SET_POWER_STATE (cmd 0xFA0F)
 
@@ -599,7 +599,7 @@ Handler: `ioctl_set_power_state` (chardev.c:562-589) + aggregation `tenstorrent_
 
 **Errors:** `-EFAULT`, `-EINVAL`, or `set_power_state`'s error (firmware message failure). **Concurrency:** `priv->mutex` then `chardev_mutex` (which nests each fd's `priv->mutex` inside during aggregation, chardev.c:497-525). **Lifetime:** contribution removed at close by aggregation-after-list_del (chardev.c:938-941).
 
-Used by tt-umd (pci_device.cpp:525 area; version-gated per kmd_versions.hpp — introduced in KMD 2.6.0).
+**[UNVERIFIED]** Used by tt-umd (pci_device.cpp:525 area; version-gated per kmd_versions.hpp — introduced in KMD 2.6.0). The version gating / "introduced in KMD 2.6.0" is backed by kmd_versions.hpp:39, but the `:525` usage citation is wrong (blank line): power state is set via `PCIDevice::set_power_state`/`tt_device_set_power_state` (pci_device.cpp:1056, 1071).
 
 ## Ioctl 16 — TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF (cmd 0xFA10)
 
@@ -646,7 +646,7 @@ Not called by tt-umd (not even in its vendored header, which predates this ioctl
 
 ## tt-umd usage summary (quick grep; deep analysis is another section's job)
 
-Called from tt-umd code: GET_DEVICE_INFO, GET_DRIVER_INFO, QUERY_MAPPINGS, PIN_PAGES (4 sites incl. extended-out and hugepage paths), UNPIN_PAGES, ALLOCATE_DMA_BUF, ALLOCATE_TLB, FREE_TLB, CONFIGURE_TLB, SET_POWER_STATE, SET_NOC_CLEANUP, RESET_DEVICE (tt-umd/device/pcie/pci_device.cpp:177, 158, 451, 611/660/714/753, 788, 971, 417, 432/455, 492/511, 525, 309, 545). Defined-but-unused by tt-umd: GET_HARVESTING, FREE_DMA_BUF, LOCK_CTL, MAP_PEER_BAR; EXPORT_TLB_DMABUF absent from its header.
+Called from tt-umd code: GET_DEVICE_INFO, GET_DRIVER_INFO, QUERY_MAPPINGS, PIN_PAGES (4 sites incl. extended-out and hugepage paths), UNPIN_PAGES, ALLOCATE_DMA_BUF, ALLOCATE_TLB, FREE_TLB, CONFIGURE_TLB, SET_POWER_STATE, SET_NOC_CLEANUP, RESET_DEVICE **[UNVERIFIED line map]** (tt-umd/device/pcie/pci_device.cpp:177, 158, 451, 611/660/714/753, 788, 971, 417, 432/455, 492/511, 525, 309, 545). Only GET_DEVICE_INFO:177, QUERY_MAPPINGS:451, PIN_PAGES:611/660/714/753, UNPIN_PAGES:788 and ALLOCATE_DMA_BUF:971 match the current tt-umd source. The remaining citations do not match: GET_DRIVER_INFO:158, ALLOCATE_TLB:417, FREE_TLB:432/455, CONFIGURE_TLB:492/511, SET_POWER_STATE:525, SET_NOC_CLEANUP:309, RESET_DEVICE:545 (SET_NOC_CLEANUP is absent from tt-umd entirely; the others are reached through the `tt_device_t` abstraction / `PCIDevice::allocate_tlb`@820, `configure_tlb`@845, `set_power_state`@1056, `send_reset_ioctl`@200/905, `tt_driver_get_attr`@430). Defined-but-unused by tt-umd: GET_HARVESTING, FREE_DMA_BUF, LOCK_CTL, MAP_PEER_BAR; EXPORT_TLB_DMABUF absent from its header.
 
 ## Key constants table
 
@@ -679,7 +679,7 @@ Called from tt-umd code: GET_DEVICE_INFO, GET_DRIVER_INFO, QUERY_MAPPINGS, PIN_P
 | WH TLB windows (BAR0) | 156 x 1M, 10 x 2M, 20 x 16M; id 185 kernel-reserved | wormhole.c:20-33, 87, 702, 1062-1063 |
 | WH NOC address width | 36 bits (`WH_NOC_BITS`) | wormhole.c:37, 863 |
 | WH noc_dma_limit / noc_pcie_offset | 0xFFFDFFFF / 0x8_0000_0000 | wormhole.c:1059-1060 |
-| BH TLB windows | 202 x 2M (BAR0, id 201 kernel-reserved), ≤8 x 4G (BAR4) | blackhole.c:20-31, 40, 580, 610, 820-821 |
+| BH TLB windows | 202 x 2M (BAR0, id 201 kernel-reserved), ≤8 x 4G (BAR4) | blackhole.c:20-31, 40, 580, 609, 820-821 |
 | BH noc_dma_limit / noc_pcie_offset | (1<<58)-1 / 4<<58 | blackhole.c:817-818 |
 | TT_TLB_DMABUF_SG_CHUNK | 1 GiB | memory.c:1036 |
 | PCIe hot reset timings | 2 ms assert, 500 ms settle, 10000 ms link poll | pcie.c:76-80 |

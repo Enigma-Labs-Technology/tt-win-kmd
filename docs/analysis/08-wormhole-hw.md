@@ -327,7 +327,7 @@ NIU counters at `NIU_COUNTERS_START = NOC2AXI_START + 0x200` (`wormhole.c:386`);
 1. `map_bar4_to_system_registers` (always).
 2. **Only if `arc_l2_is_running`:** send `WH_FW_MSG_CURR_DATE` (via `wormhole_send_curr_date`), `WH_FW_MSG_ASTATE0` (10 ms), `update_device_index`, `wormhole_complete_pcie_init`, and `WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT` with `auto_reset_timeout` (`wormhole.c:723-732`).
 
-`update_device_index` (`wormhole.c:464-471`): sends `WH_FW_MSG_PCIE_INDEX` with `arg0 = ordinal | 0x80` (`INDEX_VALID`), 10 s timeout.
+`update_device_index` (`wormhole.c:464-471`): sends `WH_FW_MSG_PCIE_INDEX` with `arg0 = ordinal | 0x80` (`INDEX_VALID`), 10 ms timeout (`10*1000` µs, `wormhole.c:470`).
 
 `wormhole_send_curr_date` (`wormhole.c:321-360`) + `month_lookup` (`wormhole.c:303-319`): packs current UTC date/time (seconds since 2020-01-01, leap handling) into two 16-bit args and sends `WH_FW_MSG_CURR_DATE` (1 ms timeout). Purely informational to FW.
 
@@ -344,7 +344,7 @@ Removal order (`enumerate.c:404-446`): cancel `fw_ready_work` (WH-only) → set 
 
 `wormhole_reset(tt_dev, reset_flag)` (`wormhole.c:473-518`), class op `.reset`:
 - `reset_arg = 3` iff `reset_flag == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET (5)` else `0` (`wormhole.c:477`; flag values `ioctl.h:143-151`).
-- Probe responsiveness with `WH_FW_MSG_NOP` (1 s) (`wormhole.c:481`).
+- Probe responsiveness with `WH_FW_MSG_NOP` (1 ms; `1000` µs) (`wormhole.c:481`).
 - If unresponsive: if `auto_reset_timeout == 0` (watchdog disabled), log and **return false** (`wormhole.c:488-491`). Else loop for `auto_reset_timeout*1000 + 500` ms, each iteration `pcie_hot_reset_and_restore_state` then retry NOP; between tries `msleep_interruptible(1000)` (signal → return false) (`wormhole.c:493-505`).
 - If responsive: `set_reset_marker(pdev)`, then `WH_FW_MSG_TRIGGER_RESET` with `arg0=reset_arg` and **`timeout_us=0`** (fire-and-forget), return **true** (assumes success) (`wormhole.c:508-513`).
 - Still unresponsive → log, return false (`wormhole.c:516-517`).
@@ -375,7 +375,7 @@ In `pcie.c` (generic, not WH-named except `wormhole_complete_pcie_init`):
 `pcie.c:92-131` (declared in `pcie.h:11`). Called from `wormhole_init_hardware`. Loops up to `reset_limit` (default 10, `module.c:44`) times:
 - Reads bridge target link speed (`PCI_EXP_LNKCTL2 & PCI_EXP_LNKCTL2_TLS`) and subsystem vendor id.
 - Sends `FW_MSG_PCIE_RETRAIN (0xB6)` with `arg0 = target_link_speed | (last_retry<<15)`, `arg1 = subsys_vendor_id`, 200 ms timeout, capturing `exit_code`.
-- `exit_code == 0` → success. Otherwise (unless last retry) `pci_save_state` + `pcie_hot_reset_and_restore_state` and try again. Uses interface-timer/force-pending constants at `pcie.c:16-22`.
+- `exit_code == 0` → success. Otherwise (unless last retry) `pci_save_state` + `pcie_hot_reset_and_restore_state` and try again. Uses `FW_MSG_PCIE_RETRAIN` (`pcie.c:16`); the interface-timer/force-pending constants (`pcie.c:17-22`) belong to `pcie_timer_interrupt`, not this function.
 
 ---
 
@@ -428,7 +428,7 @@ In `pcie.c` (generic, not WH-named except `wormhole_complete_pcie_init`):
 | `auto_reset_timeout` default | `10` (s) | `module.c:48` |
 | `reset_limit` default | `10` | `module.c:44` |
 | `idle_power_down_grace_ms` default | `5000` | `module.c:56` |
-| poll_completion codes | 0 ok, -1 timeout, -2 unrecognized, -3 hung | `wormhole.c:177,183,188,193` |
+| poll_completion codes | 0 ok, -3 hung, -2 unrecognized, -1 timeout | `wormhole.c:177,182,187,192` |
 
 ---
 

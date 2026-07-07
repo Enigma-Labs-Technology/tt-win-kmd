@@ -21,7 +21,7 @@ All paths below are relative to the tt-kmd repo root.
 
 `ttdriver_init()` (module.c:76-108) runs in this order, with reverse-order unwind on failure:
 
-1. `debugfs_create_dir("tenstorrent", NULL)` → global `tt_debugfs_root` (module.c:82). Failure is tolerated (debugfs API returns error pointers that are safely ignored downstream; enumerate.c:109 checks `if (tt_debugfs_root)`).
+1. `debugfs_create_dir("tenstorrent", NULL)` → global `tt_debugfs_root` (module.c:82). Failure is tolerated (debugfs API returns error pointers that are safely ignored downstream; chardev.c:109 checks `if (tt_debugfs_root)`).
 2. `proc_mkdir("driver/tenstorrent", NULL)` → global `tt_procfs_root`; NULL → `-ENOMEM` and unwind (module.c:84-88).
 3. `init_char_driver(max_devices)` (module.c:90): `alloc_chrdev_region(&tt_device_id, 0, max_devices, "tenstorrent")` then `class_create("tenstorrent")` (chardev.c:48-75). `max_devices` is a module parameter, default **32** (module.c:36-38).
 4. `tenstorrent_pci_register_driver()` → `pci_register_driver(&tenstorrent_pci_driver)` (enumerate.c:537-540).
@@ -63,7 +63,7 @@ The only global device collection is an allocating XArray:
 ```c
 static DEFINE_XARRAY_ALLOC(tenstorrent_dev_xa);
 ```
-(enumerate.c:33). Locking is the XArray's internal spinlock; the driver never iterates this collection — it is used purely as an ordinal (index) allocator and reverse map. Entries are inserted in probe (enumerate.c:287-294) and erased in remove (enumerate.c:478) and on the probe failure path (enumerate.c:398).
+(enumerate.c:33). Locking is the XArray's internal spinlock; the driver never iterates or looks up this collection (no `xa_load`/`xa_for_each` anywhere) — it is used purely as an ordinal (index) allocator; the stored `tt_dev` pointers are never read back. Entries are inserted in probe (enumerate.c:287-294) and erased in remove (enumerate.c:478) and on the probe failure path (enumerate.c:398).
 
 ### 2.1 Galaxy static ordinals
 
@@ -339,7 +339,7 @@ Also the `.shutdown` callback (enumerate.c:532). Ordered:
    tt_dev->dev_class->cleanup_device(tt_dev); // unmap BARs
    up_write(&tt_dev->reset_rwsem);
    ```
-   (enumerate.c:442-447). Every ioctl/mmap/release holds `reset_rwsem` shared and checks `detached` at entry (chardev.c:598-613, 717-729, 929), so after `up_write` no fd can touch hardware: it will observe `detached` and get `-ENODEV`. `tenstorrent_vma_zap` unmaps every user mapping (declared memory.h:60); `cleanup_device` is `pci_iounmap` of all mapped BAR regions (wormhole.c:793-801; blackhole.c:710-722).
+   (enumerate.c:442-447). Every ioctl/mmap holds `reset_rwsem` shared and checks `detached` at entry (chardev.c:598-613, 717-729); release holds it shared too (chardev.c:929) but checks `detached` inside its hardware-touching steps rather than at entry (chardev.c:869, 907; iATU teardown at memory.c:288). So after `up_write` no fd can touch hardware: ioctls/mmaps observe `detached` and get `-ENODEV`; release skips its hardware writes. `tenstorrent_vma_zap` unmaps every user mapping (declared memory.h:60); `cleanup_device` is `pci_iounmap` of all mapped BAR regions (wormhole.c:793-801; blackhole.c:710-722).
 7. **`tenstorrent_revoke_tlb_dmabufs(tt_dev)`** (enumerate.c:449-459) — must stay *after* the write-side drain; the comment explains the ordering proof (any in-flight export completed its `list_add` before the drain finished; later exporters see `detached` first).
 8. **`wake_up_interruptible(&tt_dev->resource_lock_waitqueue)`** so blocked `LOCK_CTL ACQUIRE_BLOCKING` waiters observe `detached` and return `-ENODEV` (enumerate.c:461-463; waiter logic chardev.c:323-367).
 9. **Per-fd memory cleanup**: `list_for_each_entry_safe(priv, tmp, &tt_dev->open_fds_list, open_fd) tenstorrent_memory_cleanup(priv);` (enumerate.c:465-467) — frees pinnings/DMA buffers of still-open fds. Note this walk takes **no `chardev_mutex`**.

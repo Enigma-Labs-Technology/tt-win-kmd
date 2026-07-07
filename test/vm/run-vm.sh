@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 MEM=${MEM:-8192}
 SMP=${SMP:-8}
 SSH_PORT=${SSH_PORT:-2222}
-OVMF_CODE=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)
+OVMF_CODE=$({ ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null || true; } | head -1)
 EXTRA_DEVICES=${EXTRA_DEVICES:-}   # e.g. "-device ttsim-bh,ttsim-lib=/path/libttsim.so" (M1+)
 
 [ -f win11.qcow2 ] || { echo "run make-vm.sh first" >&2; exit 1; }

@@ -15,17 +15,17 @@ Files read in full:
 - `tt-system-tools/hugepages-setup/tenstorrent-hugepages.service` (15 lines)
 - `tt-system-tools/hugepages-setup/dev-hugepages\x2d1G.mount` (15 lines)
 - `tt-system-tools/hugepages-setup/README.md` (32 lines)
-- `tt-system-tools/tt-oops/tt-oops.sh` (1293 lines)
+- `tt-system-tools/tt-oops/tt-oops.sh` (1292 lines)
 - `tt-system-tools/tt-oops/DESIGN.md` (225 lines)
 - `tt-system-tools/tt-oops/Makefile` (70 lines)
-- `tt-system-tools/README.md` (29 lines)
-- `tt-system-tools/tenstorrent-tools.spec` (79 lines)
-- `tt-system-tools/debian/control` (16 lines), `debian/rules` (13 lines),
-  `debian/changelog` (72 lines), `debian/tenstorrent-tools.install` (6 lines),
-  `debian/tenstorrent-tools.postinst` (38 lines),
-  `debian/tenstorrent-tools.lintian-overrides` (4 lines)
-- `tt-system-tools/dev-scripts/build-rpm.sh` (20 lines)
-- `tt-system-tools/.gitlab-ci.yml` (22 lines)
+- `tt-system-tools/README.md` (28 lines)
+- `tt-system-tools/tenstorrent-tools.spec` (78 lines)
+- `tt-system-tools/debian/control` (15 lines), `debian/rules` (12 lines),
+  `debian/changelog` (71 lines), `debian/tenstorrent-tools.install` (6 lines),
+  `debian/tenstorrent-tools.postinst` (37 lines),
+  `debian/tenstorrent-tools.lintian-overrides` (3 lines)
+- `tt-system-tools/dev-scripts/build-rpm.sh` (19 lines)
+- `tt-system-tools/.gitlab-ci.yml` (21 lines)
 
 Cross-referenced (consumers of hugepages; not the primary subject of this
 section):
@@ -54,7 +54,7 @@ page size to 1G:
 ```
 Options=pagesize=1G,mode=0777,nosuid,nodev
 ```
-(`dev-hugepages\x2d1G.mount:11`). The `tt-umd` side agrees:
+(`dev-hugepages\x2d1G.mount:12`). The `tt-umd` side agrees:
 `HUGEPAGE_REGION_SIZE = 1ULL << 30; // 1GB` (`tt-umd/device/hugepage.hpp:17`),
 and the comment right above it is load-bearing: *"Hugepages must be 1GB in
 size"* (`hugepage.hpp:15-16`).
@@ -152,7 +152,7 @@ Where=/dev/hugepages-1G
 Type=hugetlbfs
 Options=pagesize=1G,mode=0777,nosuid,nodev
 ```
-(`dev-hugepages\x2d1G.mount:9-11`). `mode=0777` makes the mount world
+(`dev-hugepages\x2d1G.mount:9-12`). `mode=0777` makes the mount world
 writable so any (non-root) process can create backing files there.
 `ConditionPathExists=/sys/kernel/mm/hugepages/hugepages-1048576kB` guards the
 mount so it only runs on kernels that expose 1GB hugepages, and
@@ -165,8 +165,8 @@ mount so it only runs on kernels that expose 1GB hugepages, and
   `User=root`, ordered `Before=sysinit.target` with
   `DefaultDependencies=no`, i.e. it runs very early in boot before most of
   the system is up (so 1GB pages can still be assembled)
-  (`tenstorrent-hugepages.service:2-8, 15`). `SuccessExitStatus=0`,
-  `Restart=no`, `TimeoutStopSec=10s` (`:11-13`).
+  (`tenstorrent-hugepages.service:2-9, 15`). `SuccessExitStatus=0`,
+  `Restart=no`, `TimeoutStopSec=10s` (`:10-12`).
 - The `.mount` unit is likewise `Before=sysinit.target`,
   `DefaultDependencies=no`, `WantedBy=sysinit.target`
   (`dev-hugepages\x2d1G.mount:3-4,14-15`).
@@ -217,7 +217,8 @@ the contract:
 
 2. **Read how many pages exist.** `get_num_hugepages()` reads
    `/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages`
-   (`hugepage.cpp:31-48`) — the same 1GB sysfs knob the setup script wrote.
+   (`hugepage.cpp:31-48`) — the global 1GB counter that aggregates the
+   per-node `nr_hugepages` values the setup script wrote.
    If the file cannot be opened it throws `RuntimeError` (`hugepage.cpp:42-45`).
 
 3. **Compute channels per device.**
@@ -270,8 +271,10 @@ static constexpr size_t HUGEPAGE_CHANNEL_3_SIZE_LIMIT = 768 * (1 << 20);
 (`tt-umd/device/api/umd/device/chip_helpers/silicon_sysmem_manager.hpp:20`).
 It appears anywhere a per-channel NOC mapping size is computed:
 `silicon_sysmem_manager.cpp:160-162, 290-292, 383-385` and
-`local_chip.cpp:396-401`. The full 1GB is still mmapped and pinned; only the
-NOC-visible window of channel 3 is truncated. The IOMMU (no-hugepage) path
+`local_chip.cpp:396-401`. The full 1GB is still mmapped
+(`silicon_sysmem_manager.cpp:235-236`), but the KMD pin / NOC mapping for
+channel 3 is issued with the truncated 768MB `actual_size`
+(`silicon_sysmem_manager.cpp:290-292, 297, 312`). The IOMMU (no-hugepage) path
 mirrors the same carveout: `carveout_size = HUGEPAGE_REGION_SIZE -
 HUGEPAGE_CHANNEL_3_SIZE_LIMIT; // 1GB - 768MB = 256MB`
 (`silicon_sysmem_manager.cpp:351`).
@@ -354,9 +357,10 @@ inventory (`collect_hardware_info`, `:146-250`), OS/packages/services
 Notably for this section, tt-oops captures the exact state that a hugepage
 failure would need: `cat /proc/meminfo` (`:158, 597`), the full `sysctl -a`
 dump (which includes `vm.nr_hugepages*`) (`:1052`), and `dmesg`
-(`:701-704`). This mirrors what UMD prints on a hugepage-mmap failure
-(`/proc/cmdline`, the 1GB `nr_hugepages` file, `/proc/meminfo`,
-`/proc/buddyinfo`) at `silicon_sysmem_manager.cpp:254-256, 324-326`.
+(`:701-704`). This mirrors what UMD prints on hugepage failures:
+`/proc/cmdline` and the 1GB `nr_hugepages` file on an mmap failure
+(`silicon_sysmem_manager.cpp:254-256`), and `/proc/meminfo` /
+`/proc/buddyinfo` on a pin failure (`silicon_sysmem_manager.cpp:324-326`).
 
 Input validation / behavior of note:
 - Collection level must be `basic|detailed|debug`; output format
@@ -451,10 +455,11 @@ Input validation / behavior of note:
 > channel's device-visible (NOC/iATU) window must be **768MB**
 > (`HUGEPAGE_CHANNEL_3_SIZE_LIMIT = 768 * (1 << 20)`,
 > `silicon_sysmem_manager.hpp:20`), even though the full 1GB is allocated. If
-> the Windows port takes over iATU programming from UMD (there are TODOs in
-> `local_chip.cpp:387` and `wormhole_tt_device.cpp:152` about moving this into
-> the KMD), it must reproduce this truncation to avoid the region overlapping
-> the PCIe register space.
+> the Windows port takes over iATU programming from UMD (a TODO at
+> `local_chip.cpp:387` says "KMD knows how to do this at page pinning time",
+> and `wormhole_tt_device.cpp:152` flags the related channel-3 region hack), it
+> must reproduce this truncation to avoid the region overlapping the PCIe
+> register space.
 
 > **Porting note (no mount / no hugetlbfs):** The `/dev/hugepages-1G` mount and
 > the per-device backing files (`open_hugepage_file`, `hugepage.cpp:162-220`)
@@ -482,7 +487,7 @@ Input validation / behavior of note:
 
 | Name | Value | Source cite |
 |------|-------|-------------|
-| Hugepage size | 1 GiB (`1048576kB`) | `hugepages-setup.sh:67`; `dev-hugepages\x2d1G.mount:11`; `tt-umd/device/hugepage.hpp:17` |
+| Hugepage size | 1 GiB (`1048576kB`) | `hugepages-setup.sh:67`; `dev-hugepages\x2d1G.mount:12`; `tt-umd/device/hugepage.hpp:17` |
 | `HUGEPAGE_REGION_SIZE` | `1ULL << 30` (1GB) | `tt-umd/device/hugepage.hpp:17` |
 | `MAX_HOST_MEM_CHANNELS` | 4 | `tt-umd/device/hugepage.hpp:19` |
 | Default pages: Wormhole | 4 | `hugepages-setup.sh:54` |
@@ -492,9 +497,9 @@ Input validation / behavior of note:
 | Grayskull PCI device ID | `faca` | `hugepages-setup.sh:12`; `tt-kmd/enumerate.h:16` |
 | Wormhole PCI device ID | `401e` | `hugepages-setup.sh:13`; `tt-kmd/enumerate.h:17` |
 | Blackhole PCI device ID | `b140` | `hugepages-setup.sh:14`; `tt-kmd/enumerate.h:18` |
-| Hugepage mount point | `/dev/hugepages-1G` | `dev-hugepages\x2d1G.mount:9`; `tt-umd/device/hugepage.cpp:29` |
+| Hugepage mount point | `/dev/hugepages-1G` | `dev-hugepages\x2d1G.mount:10`; `tt-umd/device/hugepage.cpp:29` |
 | sysfs count path | `/sys/.../hugepages/hugepages-1048576kB/nr_hugepages` | `hugepages-setup.sh:67-73`; `tt-umd/device/hugepage.cpp:32` |
-| Mount options | `pagesize=1G,mode=0777,nosuid,nodev` | `dev-hugepages\x2d1G.mount:11` |
+| Mount options | `pagesize=1G,mode=0777,nosuid,nodev` | `dev-hugepages\x2d1G.mount:12` |
 | Backing file mode | `0666` (`S_IWUSR..S_IROTH`) | `tt-umd/device/hugepage.cpp:200` |
 | Base backing filename | `tenstorrent` (dev0/ch0); else `device_<n>_channel_<c>_tenstorrent` | `tt-umd/device/hugepage.cpp:164,173-183` |
 | Wormhole ch-3 NOC window | 768 MB (`768 * (1<<20)`) | `tt-umd/device/api/.../silicon_sysmem_manager.hpp:20` |

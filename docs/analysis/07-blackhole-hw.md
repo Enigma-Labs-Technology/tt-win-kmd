@@ -442,7 +442,7 @@ There is **no p150a-specific code path in blackhole.c** — all Blackhole boards
 ## 12. Lifecycle / cleanup summary (fd close, device removal)
 
 - Nothing in blackhole.c is per-fd; all state is per-device. Per-fd TLB/iATU/pin cleanup is in the common layers (memory.c/tlb.c), which call back into `configure_tlb` / `configure_outbound_atu(region, 0, 0, 0)` (memory.c:284-296) to disable resources at fd close.
-- Device removal order (enumerate.c:431-446): revoke dmabufs / cancel `power_down_work` → `cleanup_hardware` (A3 message, skipped if detached) → `cleanup_telemetry` (hwmon + sysfs groups) → `cleanup_device` (unmap BARs). Suspend calls `cleanup_hardware` only (enumerate.c:506); resume calls `init_hardware` and re-saves PCI state (enumerate.c:515-519).
+- Device removal order (enumerate.c:423-459): set `detached` → cancel `power_down_work` → `cleanup_hardware` (A3 message, skipped if detached or device already gone) → `cleanup_telemetry` (hwmon + sysfs groups) → `cleanup_device` (unmap BARs) → revoke TLB dmabufs (enumerate.c:459, after BAR unmap). Suspend calls `cleanup_hardware` only (enumerate.c:506); resume calls `init_hardware` and re-saves PCI state (enumerate.c:515-519).
 - `telemetry_attrs` array is devm-allocated (blackhole.c:582) — freed automatically at unbind; a Windows port must free it explicitly in cleanup.
 
 ---

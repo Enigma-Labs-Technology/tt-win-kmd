@@ -10,7 +10,7 @@ Primary files (read in full):
 | `chardev.h` | 18 |
 | `chardev_private.h` | 82 |
 
-Supporting files read for context and cited where load-bearing: `ioctl.h` (458 lines, read in full), `memory.c` (1742 lines; mmap dispatch, query-mappings, TLB-allocate, cleanup, and vma-zap paths), `memory.h` (73), `device.h` (127), `tlb.c` (109), `module.c` / `module.h` (params), `enumerate.c` / `enumerate.h` (registration context, remove path). All paths are relative to the tt-kmd repo root at tag `ttkmd-2.10.0-rc1-1-g8c32c2b`.
+Supporting files read for context and cited where load-bearing: `ioctl.h` (458 lines, read in full), `memory.c` (1742 lines; mmap dispatch, query-mappings, TLB-allocate, cleanup, and vma-zap paths), `memory.h` (73), `device.h` (127), `tlb.c` (108), `module.c` / `module.h` (params), `enumerate.c` / `enumerate.h` (registration context, remove path). All paths are relative to the tt-kmd repo root at tag `ttkmd-2.10.0-rc1-1-g8c32c2b`.
 
 ---
 
@@ -24,7 +24,7 @@ Supporting files read for context and cited where load-bearing: `ioctl.h` (458 l
 res = alloc_chrdev_region(&tt_device_id, 0, max_devices, TENSTORRENT);   // chardev.c:55
 tt_dev_class = class_create(TENSTORRENT);                                 // chardev.c:60 (>=6.4 form)
 ```
-(chardev.c:48-75). `TENSTORRENT` is `"tenstorrent"` (enumerate.h:13). `max_devices` is a module parameter defaulting to **32** (module.c:36-38). On class-create failure the chrdev region is unregistered and the `alloc_chrdev_region` error is returned (chardev.c:71-74). `cleanup_char_driver()` destroys the class then unregisters the region (chardev.c:77-83).
+(chardev.c:48-75). `TENSTORRENT` is `"tenstorrent"` (enumerate.h:13). `max_devices` is a module parameter defaulting to **32** (module.c:36-38). On class-create failure the chrdev region is unregistered and `res` is returned — but `res` still holds `alloc_chrdev_region`'s successful return (0) at that point, so `init_char_driver` actually reports *success* despite the failed class creation (apparent upstream bug; chardev.c:56, 64-74). `cleanup_char_driver()` destroys the class then unregisters the region (chardev.c:77-83).
 
 Per-device minor = base minor + device ordinal:
 
@@ -50,7 +50,7 @@ Because the name contains a `/`, udev creates the node as **`/dev/tenstorrent/<o
 
 `tenstorrent_unregister_device` removes debugfs recursively, removes procfs, then `cdev_device_del` (chardev.c:121-126). Note there is no forced revocation of already-open fds here; they are handled by the `detached` flag (section 7).
 
-> **Porting note:** On Windows/KMDF the whole major/minor + udev-node scheme maps to a device interface GUID plus a per-device reference string (or `\\.\TenstorrentN` symbolic links) created in `EvtDeviceAdd`. The ordinal-stability property (ordinal ties the node name to a probe-order slot; a device removed and re-probed reuses its ordinal unless still referenced, enumerate.c:477-478) must be reproduced deliberately if UMD-on-Windows enumerates by index.
+> **Porting note:** On Windows/KMDF the whole major/minor + udev-node scheme maps to a device interface GUID plus a per-device reference string (or `\\.\TenstorrentN` symbolic links) created in `EvtDeviceAdd`. The ordinal-stability property (ordinal ties the node name to an xarray slot allocated at probe, enumerate.c:284-294; the slot is erased unconditionally at remove — deliberately not postponed to last-close — so a re-probed device can reuse the ordinal even while stale fds still reference the old device struct, enumerate.c:477-478) must be reproduced deliberately if UMD-on-Windows enumerates by index.
 
 ---
 
@@ -275,9 +275,9 @@ Two independent flags plus a generation counter, all on `struct tenstorrent_devi
 
 Stale fds are also excluded from power aggregation (chardev.c:493-495), and blocked `ACQUIRE_BLOCKING` waiters are kicked awake to observe the change (`wake_up_interruptible` at chardev.c:299 for reset, enumerate.c:461-463 for removal) and fail with `-ENODEV` (chardev.c:353-363). Resource-lock **bits survive reset** — a stale fd cannot release them by ioctl (it gets `-ENODEV` first); only `close()` clears them (comment chardev.c:312-316, release path chardev.c:877-885).
 
-Expected UMD flow (tt-umd/device/warm_reset.cpp uses it): fd A issues USER_RESET/ASIC_RESET (gen bumps, all other fds die, vmas zapped, `needs_hw_init` set) → external reset actions → fd A issues POST_RESET (marker checked, hardware re-inited) → fd A is fully usable; everyone else must reopen.
+Expected kernel-supported flow: fd A issues a destructive reset (gen bumps, all other fds die, vmas zapped, `needs_hw_init` set) → external reset actions → fd A issues POST_RESET (marker checked, hardware re-inited) → fd A is fully usable; everyone else must reopen. Note that tt-umd's warm reset does *not* actually hold one fd across the sequence: it issues ASIC_RESET/ASIC_DMC_RESET and later POST_RESET (tt-umd/device/warm_reset.cpp:212-214, 237) via `send_reset_ioctl`, which opens a fresh fd per ioctl (tt-umd/device/pcie/pci_device.cpp:200-216). A fresh fd works because its `open_reset_gen` snapshot is taken after the bump and RESET_DEVICE is on the `needs_hw_init` allowlist. USER_RESET is defined in UMD (pci_device.hpp:95) but not issued by the warm-reset path.
 
-> **Porting note:** The port must reproduce all three predicates with the same precedence (detached → generation → needs_hw_init) and the exact three-ioctl allowlist, and must keep "resetter's handle survives" semantics — UMD's warm-reset sequence depends on driving RESET_DEVICE and POST_RESET from the same handle. `-ENODEV` maps naturally to `STATUS_DEVICE_REMOVED` / `STATUS_DEVICE_NOT_CONNECTED`.
+> **Porting note:** The port must reproduce all three predicates with the same precedence (detached → generation → needs_hw_init) and the exact three-ioctl allowlist, and must keep "resetter's handle survives" semantics — the kernel contract explicitly supports driving RESET_DEVICE and POST_RESET from one handle (chardev.c:192-194), though current tt-umd opens a fresh handle per reset ioctl (tt-umd/device/pcie/pci_device.cpp:200-216). `-ENODEV` maps naturally to `STATUS_DEVICE_REMOVED` / `STATUS_DEVICE_NOT_CONNECTED`.
 
 ---
 
@@ -343,7 +343,7 @@ Expected UMD flow (tt-umd/device/warm_reset.cpp uses it): fd A issues USER_RESET
 | Reset flags | RESTORE_STATE=0, RESET_PCIE_LINK=1, CONFIG_WRITE=2, USER_RESET=3, ASIC_RESET=4, ASIC_DMC_RESET=5, POST_RESET=6 | ioctl.h:143-151 |
 | Post-reset (`needs_hw_init`) ioctl allowlist | GET_DEVICE_INFO, GET_DRIVER_INFO, RESET_DEVICE | chardev.c:616-624 |
 | RESET_DEVICE `out.result` | `!ok` — 0 = success | chardev.c:293 |
-| NOC cleanup validation bounds | `addr` 4-byte aligned, `noc ≤ 1`, `x,y ≤ 64`, `enabled ≤ 1` | chardev.c:459-469 |
+| NOC cleanup validation bounds | `addr` 4-byte aligned, `noc ≤ 1`, `x,y ≤ 64`, `enabled ≤ 1` | chardev.c:455-469 |
 
 ## Open questions
 

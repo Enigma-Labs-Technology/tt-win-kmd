@@ -25,7 +25,7 @@ All memory objects are tracked per open file descriptor in `struct chardev_priva
 - `struct list_head pinnings` — `struct pinned_page_range.list` (chardev_private.h:59).
 - `struct list_head peer_mappings` — `struct peer_resource_mapping.list` (chardev_private.h:60).
 - `struct list_head vma_list` + `struct mutex vma_lock` — tracked user mappings (chardev_private.h:62-63).
-- `priv->mutex` guards the dmabuf hashtable, pinnings list, peer mappings list, and TLB ownership bitmap.
+- `priv->mutex` guards the dmabuf hashtable, pinnings list, and peer mappings list. The TLB ownership bitmap (`priv->tlbs`) is *checked* under `priv->mutex` in the free/export/mmap paths (memory.c:958-960, 1180-1184, 1539-1544), but `ioctl_allocate_tlb`'s `set_bit` (memory.c:941) and `ioctl_configure_tlb`'s `test_bit` (memory.c:995) run without it (atomic bitops only).
 
 A DMA buffer record is (chardev_private.h:43-51):
 
@@ -89,11 +89,11 @@ DMA buffers live in a separate range (memory.c:269-274):
 #define MMAP_SIZE_DMA_BUF (U64_C(1) << 32)
 ```
 
-With 4 KiB pages, `MMAP_OFFSET_DMA_BUF` = (4096−256)·2^32 = `0xF00_0000_0000`. Buffer *n* of an fd maps at `MMAP_OFFSET_DMA_BUF + n * MMAP_SIZE_DMA_BUF` (`dmabuf_mapping_start()`, memory.c:421-423). 256 slots × 4 GiB = 2^40 bytes, ending exactly at 2^44, adjacent to but not overlapping the TLB_WC slot which ends at `8 << 36` = 2^39... (the DMA range starts at 0xF00_0000_0000 > 0x7FF_FFFF_FFFF, so no overlap). Note the formula is PAGE_SIZE-dependent.
+With 4 KiB pages, `MMAP_OFFSET_DMA_BUF` = (4096−256)·2^32 = `0xF00_0000_0000`. Buffer *n* of an fd maps at `MMAP_OFFSET_DMA_BUF + n * MMAP_SIZE_DMA_BUF` (`dmabuf_mapping_start()`, memory.c:421-423). 256 slots × 4 GiB = 2^40 bytes, ending exactly at 2^44 = `PAGE_SIZE << 32`, the largest possible offset. The TLB_WC slot ends at `8 << 36` = 2^39 = 0x80_0000_0000, far below the DMA range start of 0xF00_0000_0000, so no overlap. Note the formula is PAGE_SIZE-dependent.
 
 ### Dispatch (`tenstorrent_mmap`, memory.c:1585-1636)
 
-`vma_target_range()` (memory.c:1330-1342) checks that the requested `[vm_pgoff<<12, vm_end)` window is fully contained in an entity's slot and, on match, **rewrites `vma->vm_pgoff` to be relative to the entity start** (memory.c:1337). Dispatch order: BAR0 UC/WC, BAR1(=BAR2) UC/WC, BAR2(=BAR4) UC/WC, TLB UC/WC, else DMA buffer, else `-EINVAL` (memory.c:1596-1635). Cache attributes are applied via `pgprot_device()` (UC) or `pgprot_writecombine()` (memory.c:1597-1626).
+`vma_target_range()` (memory.c:1330-1342) checks that the requested window (start `vm_pgoff << PAGE_SHIFT`, length `vm_end − vm_start`) is fully contained in an entity's slot and, on match, **rewrites `vma->vm_pgoff` to be relative to the entity start** (memory.c:1337). Dispatch order: BAR0 UC/WC, BAR1(=BAR2) UC/WC, BAR2(=BAR4) UC/WC, TLB UC/WC, else DMA buffer, else `-EINVAL` (memory.c:1596-1635). Cache attributes are applied via `pgprot_device()` (UC) or `pgprot_writecombine()` (memory.c:1597-1626).
 
 - **BAR mappings** (`map_pci_bar`, memory.c:1441-1475): `vm_iomap_memory(vma, bar_start, bar_len)` — the (rewritten) `vm_pgoff` becomes an offset within the BAR; a `tenstorrent_mmap_vma` tracking record (type `TT_VMA_BAR`) is added to `priv->vma_list` under `vma_lock`, and `vm_ops = &bar_vma_ops` installs open/close callbacks. Errors: `-ENOMEM` on tracking alloc failure, `vm_iomap_memory`'s error otherwise.
 - **TLB window mappings** (`map_tlb_window`, memory.c:1494-1583): offset inside the TLB slot encodes the window: it equals the window's BAR0 offset, except windows in Blackhole BAR4 are encoded at `bar_offset + BAR0_SIZE` where `BAR0_SIZE = 1UL << 29` (memory.c:29, 926-931, 1503, 1519-1520). The code linearly scans all windows via `describe_tlb` to find a `bar_offset`/BAR match (memory.c:1523-1531). Checks: `describe_tlb` exists and `tlb_kinds != 0` else `-EINVAL` (1510-1514); window found else `-EINVAL` (1533-1534); `size <= tlb_desc.size` else `-EINVAL` (1536-1537); caller owns the window (`test_bit(id, priv->tlbs)`) else `-EPERM` (1541-1544); window inside BAR else `-ENXIO` (1547-1550); `io_remap_pfn_range` failure gives `-EAGAIN` (1561-1565). VMA is tracked as `TT_VMA_TLB` with the window id. TLB VMAs forbid splitting: `.may_split` (or `.split` pre-5.11) returns `-EINVAL` (memory.c:1478-1492).

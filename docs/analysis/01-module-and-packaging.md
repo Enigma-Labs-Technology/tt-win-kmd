@@ -17,7 +17,7 @@ Files covered (line counts from `wc -l` at baseline `ttkmd-2.10.0-rc1-1-g8c32c2b
 | README.md | 65 |
 | VERSION_UPDATE.md | 16 |
 | tools/current-version | 28 |
-| .github/workflows/ (skim, CI only) | release.yml 302; test.yml, build-debian.yml, build-rpm.yml, mass-build-test.yml, hardware-test.yml, check-padding.yml, checkws.yml |
+| .github/workflows/ (skim, CI only) | release.yml 301; test.yml, build-debian.yml, build-rpm.yml, mass-build-test.yml, hardware-test.yml, check-padding.yml, checkws.yml |
 
 Supporting cross-references (read only the parts where module parameters / names defined here are consumed): chardev.c, enumerate.c, enumerate.h, pcie.c, wormhole.c, blackhole.c, telemetry.c, device.h, ioctl.h, tools/build_debs.sh, tools/build_rpms.sh, tools/exclude-from-release.
 
@@ -107,7 +107,7 @@ Consumed only in `wormhole_complete_pcie_init()` (pcie.c:92-131). If the device 
 
 ### 3.4 `auto_reset_timeout` — "Timeout duration in seconds for M3 auto reset to occur."
 Type is `byte` (`unsigned char`), so its range is 0–255 seconds. Three consumers:
-1. **Wormhole FW watchdog programming** at hardware init: `WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout` (seconds, passed raw) with 10000 ms timeout (wormhole.c:729-731).
+1. **Wormhole FW watchdog programming** at hardware init: `WH_FW_MSG_UPDATE_M3_AUTO_RESET_TIMEOUT, auto_reset_timeout` (seconds, passed raw) with 10000 µs message timeout (wormhole.c:729-731; the timeout parameter is `timeout_us`, wormhole.c:206).
 2. **Blackhole FW watchdog programming** at hardware init: `msg.header = ARC_MSG_TYPE_SET_WDT_TIMEOUT; msg.payload[0] = 1000 * auto_reset_timeout;` — converted to **milliseconds** (blackhole.c:632-636); failure is a `dev_warn` only ("normal for old FW").
 3. **Host-side reset wait** in `wormhole_reset()` (wormhole.c:484-505): if the chip does not answer a NOP ARC message, and `auto_reset_timeout == 0`, the reset **fails immediately** with "Watchdog is disabled and device is unresponsive, cannot reset." (wormhole.c:488-491). Otherwise the driver polls hot-reset+NOP in a loop until deadline `ktime_add_ms(ktime_get(), (auto_reset_timeout * 1000) + 500)` (wormhole.c:493), sleeping 1 s between attempts (interruptible; a signal aborts with `false`, wormhole.c:502-503).
 
@@ -121,7 +121,7 @@ Full description: "Delay in ms between the last fd closing a device and the idle
 
 Because this parameter is `0644`, root can retune it at runtime through `/sys/module/tenstorrent/parameters/idle_power_down_grace_ms`; the value is read fresh at each fd release, so changes take effect immediately.
 
-> **Porting note:** The natural KMDF mapping for all six parameters is registry values under the service/device `Parameters` key, read at `DriverEntry`/`EvtDeviceAdd`. `idle_power_down_grace_ms` is the only one Linux allows to change at runtime; if that capability is preserved, the Windows driver must re-read the registry (or accept a control IOCTL) rather than caching at start. The modprobe.d sample file (modprobe.d-tenstorrent.conf:1-14) shows the parameters Tenstorrent expects administrators to tune: it documents only `max_devices`, `dma_address_bits`, `reset_limit`, `auto_reset_timeout` — all commented out, i.e., defaults everywhere. An INF should likewise ship defaults and document overrides, not hard-set values.
+> **Porting note:** The natural KMDF mapping for all six parameters is registry values under the service/device `Parameters` key, read at `DriverEntry`/`EvtDeviceAdd`. `idle_power_down_grace_ms` is the only one Linux allows to change at runtime; if that capability is preserved, the Windows driver must re-read the registry (or accept a control IOCTL) rather than caching at start. The modprobe.d sample file (modprobe.d-tenstorrent.conf:1-13) shows the parameters Tenstorrent expects administrators to tune: it documents only `max_devices`, `dma_address_bits`, `reset_limit`, `auto_reset_timeout` — all commented out, i.e., defaults everywhere. An INF should likewise ship defaults and document overrides, not hard-set values.
 
 ## 4. PCI device ID table and driver structure
 
@@ -162,7 +162,7 @@ static struct pci_driver tenstorrent_pci_driver = {
 ```
 Load-bearing details:
 - **`.shutdown` is aliased to `.remove`** — at system shutdown/reboot the full remove path runs (draining work, sending power messages, unregistering the chardev). A separate reboot notifier is also registered per device when the class provides a `.reboot` hook, and it fires for reboot but *not* SYS_POWER_OFF (enumerate.c:243-251, 377-380).
-- PM ops are `SIMPLE_DEV_PM_OPS(tenstorrent_pm_ops, tenstorrent_suspend, tenstorrent_resume)` (enumerate.c:524): suspend cancels the deferred power-down work, revokes TLB dmabufs, and calls `cleanup_hardware`; resume re-runs `init_hardware` and re-saves PCI config state, returning `-EIO` on failure (enumerate.c:498-522).
+- PM ops are `SIMPLE_DEV_PM_OPS(tenstorrent_pm_ops, tenstorrent_suspend, tenstorrent_resume)` (enumerate.c:524): suspend cancels the deferred power-down work, revokes TLB dmabufs, and calls `cleanup_hardware`; resume re-runs `init_hardware` and re-saves PCI config state, returning `-EIO` on failure (enumerate.c:499-522).
 - Probe fixes up unflashed boards that enumerate with no PCI class code: `dev->class = 0x120000; /* Processing Accelerator - vendor-specific interface */` followed by `pci_assign_unassigned_bus_resources(dev->bus)` (enumerate.c:270-275).
 - Probe suppresses hotplug on Galaxy chassis, keyed by PCI subsystem device ID `0x0035` (Galaxy Wormhole) / `0x0047` (Galaxy Blackhole) (enumerate.c:42-43, 355-357).
 
@@ -180,7 +180,7 @@ Three distinct version identities exist and must not be conflated:
 2. **ioctl ABI version** — `#define TENSTORRENT_DRIVER_VERSION 2` (ioctl.h:10), returned as `out.driver_version` (chardev.c:176). This is the compatibility number UMD checks; it changes only on ABI breaks, independent of the package version.
 3. **Package version** — `PACKAGE_VERSION="2.10.1-pre"` in dkms.conf:2 and `modver=2.10.1-pre` in AKMBUILD:2. VERSION_UPDATE.md names dkms.conf the "Primary Source of Truth" and lists AKMBUILD, debian/changelog, module.h, and ioctl.h as needing manual sync (VERSION_UPDATE.md:5-12).
 
-Automation: `tools/current-version` prints `MAJOR.MINOR.PATCH SUFFIX` **parsed from module.h** (tools/current-version:18-28) — despite VERSION_UPDATE.md:16 claiming it extracts from dkms.conf. The release workflow rewrites dkms.conf, AKMBUILD, and module.h together from a single user-supplied semver string (release.yml:88-118), tags releases `ttkmd-<version>` (release.yml:176-179), and then bumps to the next `-pre` patch version for development (release.yml:241-267) — which is why the working tree reads `2.10.1-pre` one commit after tag `ttkmd-2.10.0-rc1`. Debian/RPM packaging converts `-` to `~` for correct prerelease ordering (build-debian.yml step "Determine version": `DEB_VERSION="${VERSION//-/\~}"`).
+Automation: `tools/current-version` prints `MAJOR.MINOR.PATCH SUFFIX` **parsed from module.h** (tools/current-version:18-28) — despite VERSION_UPDATE.md:16 claiming it extracts from dkms.conf. The release workflow rewrites dkms.conf, AKMBUILD, and module.h together from a single user-supplied semver string (release.yml:88-118), tags releases `ttkmd-<version>` (release.yml:176-179), and then bumps to the next `-pre` patch version for development (release.yml:241-267) — which is why the working tree reads `2.10.1-pre` one commit after tag `ttkmd-2.10.0-rc1`. Debian/RPM packaging converts `-` to `~` for correct prerelease ordering (build-debian.yml step "Determine version for artifact naming": `DEB_VERSION="${VERSION//-/\~}"`; build-rpm.yml does the same for `RPM_VERSION`).
 
 > **Porting note:** For Windows: the ioctl ABI number (`2`) and the numeric major/minor/patch must round-trip through the ported GET_DRIVER_INFO exactly, since tt-umd gates features on them. The package version maps to INF `DriverVer` (which cannot carry a `-pre` suffix — DriverVer is `mm/dd/yyyy,w.x.y.z`; encode prerelease-ness in the 4th numeric field or drop it). Keep a single source of truth and generate both the INF and the driver's version header from it, mirroring release.yml's atomic multi-file update.
 
@@ -213,7 +213,7 @@ Semantics:
 - **Makefile targets** (Makefile:35-55): `make dkms` = `dkms add . && dkms install --force tenstorrent/$(VERSION) && modprobe tenstorrent`; `make dkms-remove` unloads and removes every installed tenstorrent DKMS version; `make akms`/`akms-remove` are the Alpine (akms/doas) equivalents. `VERSION` comes from `tools/current-version` (Makefile:14).
 - **AKMBUILD** (AKMBUILD:1-3): Alpine akms metadata — `modname=tenstorrent`, `modver=2.10.1-pre`, `built_modules='tenstorrent.ko'`.
 - **Deb postinst** additionally runs `common.postinst`, `modprobe tenstorrent || true`, and `udevadm control --reload || true` (tools/build_debs.sh:97-104); the RPM `%post` similarly reloads udev and attempts modprobe (tools/build_rpms.sh:99-131).
-- **modprobe.d-tenstorrent.conf** is a documentation-only sample (every `options` line commented out, modprobe.d-tenstorrent.conf:1-14) and is *excluded* from source release tarballs (tools/exclude-from-release:4). It lists only 4 of the 6 parameters.
+- **modprobe.d-tenstorrent.conf** is a documentation-only sample (every `options` line commented out, modprobe.d-tenstorrent.conf:1-13) and is *excluded* from source release tarballs (tools/exclude-from-release:4). It lists only 4 of the 6 parameters.
 - NixOS support exists via a flake overlay; the udev rules must be added to `services.udev.packages` separately from the module (README.md:38-56) — reinforcing that the rules file is a required, separately-installed companion to the module.
 
 > **Porting note:** The DKMS design translates to a signed driver package (INF + SYS + CAT) installed by pnputil/DPInst-equivalent; there is no rebuild-per-kernel concern on Windows. The three install-time side effects the Windows installer must replicate: (1) device security/permissions (udev MODE 0666 → SDDL in INF or `EvtDeviceAdd`), (2) stable-name links (by-id → device properties/interface strings), (3) immediate driver load on install without reboot (modprobe in postinst → INF-based install triggers PnP start automatically for present devices).

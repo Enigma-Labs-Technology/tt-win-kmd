@@ -59,7 +59,7 @@ Failures are reported by throwing `test_failure` (a `std::runtime_error` carryin
 ### 1.2 Device enumeration (itself a test)
 
 `EnumerateDevices()` (test/enumeration.cpp:142-167) cross-checks the driver's userspace surface:
-- Every entry in `/dev/tenstorrent/` must be a character device whose sysfs `subsystem` link resolves to `tenstorrent` (test/enumeration.cpp:30-36, 46-59). A char device there that is *not* bound to the tenstorrent driver is a failure (test/enumeration.cpp:56-57).
+- Every character-device entry in `/dev/tenstorrent/` must have a sysfs `subsystem` link resolving to `tenstorrent` (test/enumeration.cpp:30-36, 46-59); non-char-device entries are silently skipped (test/enumeration.cpp:53-54). A char device there that is *not* bound to the tenstorrent driver is a failure (test/enumeration.cpp:56-57).
 - Every PCI device with vendor ID `0x1E52` (test/enumeration.cpp:82) must have exactly one `tenstorrent/` class-device subdirectory containing a `dev` file with `MAJOR:MINOR` (test/enumeration.cpp:93-109). Zero nodes (test/enumeration.cpp:94-95) or more than one (test/enumeration.cpp:97-98) is a failure.
 - The set of dev_t from `/dev/tenstorrent` must exactly equal the set derived from PCI sysfs: "PCI devices and driver-reported devices do not match." (test/enumeration.cpp:155-156).
 - Device type is determined by PCI device ID: `0x401e → Wormhole`, `0xb140 → Blackhole`; any other DID is a hard error (test/enumeration.cpp:133-139).
@@ -169,7 +169,7 @@ Contract summary in header comment (test/pin_pages.cpp:4-11). For `TENSTORRENT_I
   - IOMMU off: **at most one** may succeed; both may fail (test/pin_pages.cpp:347-351).
 - `TENSTORRENT_IOCTL_UNPIN_PAGES`: unpinning with exact `virtual_address`/`size` of a prior pin succeeds (test/pin_pages.cpp:356-384); `size = 0`, `size = page_size/2` and `size = page_size*2` (superset of the pinned range) must all fail (test/pin_pages.cpp:386-434) — unpin must match the pinned region exactly.
 
-Note test/pin_pages.cpp:271: "6.8 fails to pin temporary files but works with shared memory objects" — the pinnability of file-backed pages varies by kernel; the ABI contract is only asserted for anonymous/shm memory.
+Note test/pin_pages.cpp:270: "6.8 fails to pin temporary files but works with shared memory objects" — the pinnability of file-backed pages varies by kernel; the ABI contract is only asserted for anonymous/shm memory.
 
 ### 2.9 TestLock (test/lock.cpp)
 
@@ -204,7 +204,7 @@ Skipped when `/sys/bus/pci/devices/<bdf>/hwmon` doesn't exist (test/hwmon.cpp:78
 For `TENSTORRENT_IOCTL_MAP_PEER_BAR` run over every ordered device pair:
 - Same device (two fds to the same node): must fail (returns -1; errno not asserted) (test/map_peer_bar.cpp:110-125, dispatch test/map_peer_bar.cpp:153-156).
 - Different chip generations (different PCI DIDs): must fail (test/map_peer_bar.cpp:127-142, 157-160).
-- Same-type distinct devices: mapping each *memory* BAR of the peer with `peer_bar_offset = 0` and `peer_bar_length = min(bar_size, 0xFFFFF000)` must succeed ("Cap to the largest page-aligned size the u32 ABI field can hold", test/map_peer_bar.cpp:97) (test/map_peer_bar.cpp:83-108). BAR geometry is read from the undocumented sysfs `resource` file, with flags decoded per include/linux/ioport.h values 0x100 (IO), 0x200 (memory), 0x2000 (prefetchable) (test/map_peer_bar.cpp:37-81).
+- Same-type distinct devices: mapping each *memory* BAR of the peer with `peer_bar_offset = 0` and `peer_bar_length = min(bar_size, 0xFFFFF000)` must succeed ("Cap to the largest page-aligned size the u32 ABI field can hold", test/map_peer_bar.cpp:96-97) (test/map_peer_bar.cpp:83-108). BAR geometry is read from the undocumented sysfs `resource` file, with flags decoded per include/linux/ioport.h values 0x100 (IO), 0x200 (memory), 0x2000 (prefetchable) (test/map_peer_bar.cpp:37-81).
 - Overrun variant asserts `EINVAL` when `peer_fd` refers to the same device (test/ioctl_overrun.cpp:180-194).
 
 > **Porting note:** `peer_fd` is a file descriptor identifying the peer device's open handle. A Windows port needs a handle-based equivalent (e.g. passing a HANDLE and resolving via `ObReferenceObjectByHandle` to confirm it is a tenstorrent file object) — the tests demand the driver be able to identify "same underlying device" and "different chip type" from that handle.
@@ -228,10 +228,10 @@ Blackhole assertions:
 - CONFIGURE_TLB misaligned-address rejection as on Wormhole (no 36-bit check on Blackhole) (test/tlbs.cpp:477-521).
 
 Both device types:
-- **Partial unmap of a TLB window must fail**: after mmapping a 2M window, `munmap` of each individual 4K page must fail (the Linux driver sets `VM_DONTEXPAND`-style single-VMA semantics; the test asserts `munmap(...) == -1` per page) (test/tlbs.cpp:523-548). If `mremap` of a page succeeds (kernel-version dependent: "fails on 5.15.0 (fine), succeeds on 5.4.0"), the remapped page's reference must prevent `FREE_TLB` until it is unmapped (test/tlbs.cpp:550-577).
+- **Partial unmap of a TLB window must fail**: after mmapping a 2M window, `munmap` of each individual 4K page must fail (the Linux driver forbids VMA splits via a `.may_split`/`.split` vm_ops hook that returns `-EINVAL`, memory.c:1478-1490; the test asserts each per-page `munmap` returns nonzero) (test/tlbs.cpp:523-548). If `mremap` of a page succeeds (kernel-version dependent: "fails on 5.15.0 (fine), succeeds on 5.4.0"), the remapped page's reference must prevent `FREE_TLB` until it is unmapped (test/tlbs.cpp:550-577).
 - **A window that is mmapped cannot be freed**: `FREE_TLB` fails while a mapping exists, succeeds after `munmap` (test/tlbs.cpp:581-605).
 
-> **Porting note:** The reference counting contract — outstanding user mappings pin a TLB window; FREE_TLB fails (nonzero) while mapped — must hold on Windows via MDL/section lifetime tracking. "Partial unmap must fail" is enforced by Linux VMA semantics; on Windows, mapping the window as a single section view naturally gives all-or-nothing unmap.
+> **Porting note:** The reference counting contract — outstanding user mappings pin a TLB window; FREE_TLB fails (nonzero) while mapped — must hold on Windows via MDL/section lifetime tracking. "Partial unmap must fail" is enforced by the driver's `.may_split` rejection (memory.c:1478-1490); on Windows, mapping the window as a single section view naturally gives all-or-nothing unmap.
 
 ### 2.13 TestTlbExport (test/dmabuf_export.cpp)
 
@@ -253,7 +253,7 @@ For `TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF` (struct: `{argsz, flags, tlb_id, fd, o
 
 ### 2.14 TestDeviceRelease (test/release.cpp)
 
-For `TENSTORRENT_IOCTL_SET_NOC_CLEANUP` (struct `{argsz, enabled, data, x, y, addr}`):
+For `TENSTORRENT_IOCTL_SET_NOC_CLEANUP` (struct `{argsz, flags, enabled, x, y, noc, reserved0, addr, data}`; ioctl.h:349-359):
 - After arming `{enabled=true, data=0xDEADBEEF, x, y, addr}` and closing the fd, a fresh fd reading `(x,y,addr)` through a 2M TLB window must observe `0xDEADBEEF` — the driver performs the 32-bit NOC write during release (test/release.cpp:18-53).
 - Arming then disarming (`enabled=false`) must leave the prior memory content (0x0DDBA115) untouched after close (test/release.cpp:55-91).
 - Target tiles: Wormhole DRAM (0,0) addr 0 (test/release.cpp:93-98); Blackhole DRAM (17,12) translated / (0,0) untranslated (test/release.cpp:100-109).
@@ -346,7 +346,7 @@ Bash workaround for Thunderbolt-attached devices whose BARs get `<unassigned>`: 
 - **tools/current-version** parses `TENSTORRENT_DRIVER_VERSION_{MAJOR,MINOR,PATCH,SUFFIX}` out of `module.h` and prints e.g. `2.10.1-pre` (tools/current-version:18-28; module.h:19-22 currently 2/10/1/"-pre"). `module.h` is the single version source; build_debs.sh:22-30 and build_rpms.sh:20-28 hard-fail if `dkms.conf`'s `PACKAGE_VERSION` disagrees.
 - **tools/make-source-release** creates a DKMS source tarball, excluding paths in **tools/exclude-from-release** (`tools`, `test`, `ttkmd_*.tar`, `modprobe.d-tenstorrent.conf`, `.git*`, `.cache`, `*.deb`, `*.rpm`; tools/exclude-from-release:1-8), and refuses to ship if any `.o` files leak in (tools/make-source-release:52-61).
 - **tools/make-installer** + **tools/installer-header.sh** build a self-extracting shell installer (gzip'd DKMS tarball appended after a `__CUT_HERE__` marker) that removes old DKMS versions, `dkms ldtarball`/`install`, and reloads the module (tools/installer-header.sh:8-33).
-- **tools/build_debs.sh** / **tools/build_rpms.sh** produce `tenstorrent-dkms` .deb/.rpm packages; both install `udev-50-tenstorrent.rules` into `/lib/udev/rules.d` (build_debs.sh:74-75; build_rpms.sh:95-97), convert `-` to `~` in versions for pre-release ordering (build_debs.sh:32-33; build_rpms.sh:30-34), and modprobe the module on install.
+- **tools/build_debs.sh** / **tools/build_rpms.sh** produce `tenstorrent-dkms` .deb/.rpm packages; both install `udev-50-tenstorrent.rules` into `/lib/udev/rules.d` (build_debs.sh:74-75; build_rpms.sh:95-97), convert `-` to `~` in versions for pre-release ordering (build_debs.sh:32-33; build_rpms.sh:31-35), and modprobe the module on install.
 
 All of section 4.5 is Linux distribution machinery with no ABI content; the Windows analogue is the INF/CAT/MSI signing pipeline.
 
@@ -424,7 +424,7 @@ All of section 4.5 is Linux distribution machinery with no ABI content; the Wind
 | BH tensix node-id reg | 0xffb20148 (grid 17×12; x∈[1,7]∪[10,16], y∈[2,11]) | test/tlbs.cpp:360-371 |
 | BH PCI tile node-id reg | 0xFFFFFFFFFF000148; tile (19,24) translated, (2,0) not | test/tlbs.cpp:413, 421-429 |
 | BH ARC tile / reg | (8,0), 0x0000000080050044 | test/tlbs.cpp:436-437 |
-| node-id decode | x=bits[5:0], y=bits[11:6] | test/tlbs.cpp:93-94 |
+| node-id decode | x=bits[5:0], y=bits[11:6] | test/tlbs.cpp:92-93 |
 | ioctl magic / RESET_DEVICE nr | 0xFA / 6 | tools/reset.c:38-40 |
 | RESET flags ASIC / ASIC_DMC / POST_RESET | 4 / 5 / 6 | tools/reset.c:43-45; ioctl.h:149-151 |
 | Reset poll timeouts | 5 s ASIC, 10 s DMC, 10 s re-find; 500 ms WH settle | tools/reset.c:222-225, 262 |
@@ -452,4 +452,4 @@ All of section 4.5 is Linux distribution machinery with no ABI content; the Wind
 6. **TLB partial-unmap behavior is kernel-version dependent in the mremap leg** (test/tlbs.cpp:550-553: "fails on 5.15.0 (fine), succeeds on 5.4.0"); the ABI-stable requirement is only that any surviving user mapping blocks FREE_TLB. A Windows port should define its own all-or-nothing mapping semantics explicitly.
 7. **`VerifyPinPagesMultipleRanges` uses 1024 pins** but calls the count `max_pinned_ranges` (test/pin_pages.cpp:183) — whether 1024 is an actual driver limit or an arbitrary test number is not established here; check the pin-pages section of the driver analysis.
 8. **AER expectations in virtualized environments**: `--skip-aer` exists because AER "seems to be disabled" in VMs (test/main.cpp:34-36). For a Windows port, the equivalent expectation (AER handled by OS/platform, driver-visible or not) needs its own decision.
-9. **nix overlay marks kernels < 6.10 broken** (contrib/packaging/nix/overlay.nix:20) while mass-build-test targets v4.18+ (test/mass-build-test:9) — the true minimum supported kernel is ambiguous from these directories alone (irrelevant to Windows except as a hint about which kernel-API fallbacks exist in the driver).
+9. **nix overlay marks kernels < 6.10 broken** (contrib/packaging/nix/overlay.nix:19) while mass-build-test targets v4.18+ (test/mass-build-test:9) — the true minimum supported kernel is ambiguous from these directories alone (irrelevant to Windows except as a hint about which kernel-API fallbacks exist in the driver).
