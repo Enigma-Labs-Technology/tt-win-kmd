@@ -107,3 +107,57 @@ Per-milestone implementation work (M1+) starts only after
 gate for all porting work and its findings (BAR layouts, mmap offset encodings,
 reset ordering) are inputs to that work. M0 and the test rig do not wait for it;
 they depend only on facts already verified directly.
+
+## DD-8: M3 memory-management design (MAP/UNMAP, TLB pool, DMA bufs, pinning)
+
+**MAP/UNMAP ioctls** (`0x80FA2400/2404`) replace `mmap`/`munmap`. Input is the
+opaque Linux mmap-offset token (QUERY_MAPPINGS `mapping_base`, ALLOCATE_DMA_BUF
+`mapping_offset`, ALLOCATE_TLB `mmap_offset_uc/wc`) plus a byte offset within
+the region and a length; output is the user VA. Decoding replicates
+`tenstorrent_mmap` (memory.c:1585-1636): regions `(0..7)<<36` for BAR 0/2/4
+UC/WC and TLB UC/WC, DMA buffers at `0xF00_0000_0000 + idx*4GiB` (the 4K-page
+Linux constant, frozen for the shim per analysis §05 OQ5). Sub-range maps within
+BARs are legal (tt-umd depends on them). The open-BAR security model is
+preserved deliberately (analysis §06 §"How userspace uses this"): tt-umd
+configures TLBs through user BAR0 register writes.
+
+**Mapping mechanism:** device memory is mapped UC/WC with `MmMapIoSpaceEx`, then
+exposed to user mode via `IoAllocateMdl` + `MmBuildMdlForNonPagedPool` +
+`MmMapLockedPagesSpecifyCache(UserMode, MmNonCached/MmWriteCombined)`; DMA
+common buffers map their nonpaged VA `MmCached`. Every mapping is tracked on the
+owning file object and force-unmapped at handle cleanup (delivered in the owning
+process context) — spec hard constraint 5 groundwork for M4 reset teardown.
+
+**TLB pool:** device-global bitmap of 210 windows (2M ids 0..201, 4G ids
+202..209); id 201 kernel-reserved at init (blackhole_init parity); 4G count
+clamped by BAR4 length. Exact-size allocation only (tlb.c:20-33: no round-up).
+Single owner (file object) per window replaces Linux's bitmap+refcount — the
+refcount only matters for dma-buf exports, which are STATUS_NOT_SUPPORTED here.
+Hardware TLB registers are deliberately NOT cleared on free (upstream parity;
+analysis §06 open question).
+
+**DMA buffers:** WDFDMAENABLER (Scatter/Gather64 profile, 58-bit BH mask) +
+`WdfCommonBufferCreate` per buffer; ≤256 MiB, page-multiple, 256 slots per
+handle, duplicate index -EINVAL — validation order byte-for-byte with
+memory.c:439-458. FREE_DMA_BUF stays -EINVAL (upstream stub). Cleanup order
+deliberately INVERTS Linux: iATU region torn down BEFORE the buffer is freed
+(analysis §05 porting note — upstream frees memory first, leaving a window
+where the device aperture targets freed RAM).
+
+**iATU outbound allocator:** verbatim port (16 regions, first-fit top-down/
+bottom-up over [0, 2^58-1], noc_address = (4<<58)+base, ≤1 TiB per region,
+registers per blackhole.c:755-788), device-global table + PASSIVE lock,
+per-file-object ownership for cleanup.
+
+**PIN_PAGES:** `IoAllocateMdl` + `MmProbeAndLockPages(UserMode, IoWriteAccess)`
+(FOLL_LONGTERM analogue: MDL held until unpin/close), then PFN-contiguity walk
+— the Linux no-IOMMU path. There is no driver-controllable remapping domain on
+Windows client SKUs, so: READ_ONLY → STATUS_NOT_SUPPORTED (-EOPNOTSUPP parity),
+and discontiguous buffers → STATUS_INVALID_PARAMETER (-EINVAL parity). Duplicate
+(VA, page-count) pin → STATUS_OBJECT_NAME_COLLISION (-EEXIST). `MmUnlockPages`
+dirties write-locked pages automatically (unpin_user_pages_dirty_lock parity).
+
+**Deferred from M3:** MAP_PEER_BAR (ioctl 9) requires two devices; libttsim is a
+process singleton so the rig cannot exercise it — implementation deferred with
+the matrix row noting the blocker. EXPORT_TLB_DMABUF (16) → STATUS_NOT_SUPPORTED
+per the matrix design note. SET_NOC_CLEANUP (14) lands with M5 lifecycle work.
