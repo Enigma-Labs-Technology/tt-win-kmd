@@ -74,5 +74,12 @@ require loading management-firmware blobs into the simulator?
 Blackhole (`ttsim/src/tile.cpp:266-295`): telemetry table at CSM+0x100 / values
 at +0x200, ARC message QCB at CSM+0x300 and queues at +0x400 (4 queues × 8
 entries × 32-byte entries, 32-byte header — matching the protocol in analysis
-§09), board ID P150 (primary target p150a). The BAR0 CSM window
-(0x1FE80000-0x1FEFFFFF) routes to this memory. M2 tests run against stock ttsim.
+§09), board ID P150 (primary target p150a). M2 tests run against stock ttsim.
+
+**Access-path note (corrected):** the fixed BAR0 CSM aperture
+(`ARC_BAR0_CSM_BASE 0x1FE80000`, libttsim.cpp:37) is **Wormhole-only**
+(`TT_ARCH_VERSION == 0` block). On Blackhole the driver reaches ARC CSM through
+NOC TLB windows — which is exactly why `blackhole_init` claims kernel TLB
+window 201 and maps `tlb_regs` (blackhole.c:587-588). M2 therefore requires
+kernel-TLB window programming (config registers at BAR0+0x1FC00000) as its
+first driver deliverable, before any msgqueue traffic.
