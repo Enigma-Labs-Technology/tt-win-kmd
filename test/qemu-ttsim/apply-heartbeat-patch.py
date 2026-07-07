@@ -17,6 +17,33 @@ import sys
 MARK = "test-rig heartbeat patch"
 
 
+def patch_libttsim(path: str) -> None:
+    """BH strided-TLB registers (BAR0 0x1FC009D8..0x1FC00A57, 32 x 4B) are real
+    hardware that tt-kmd writes (strided-config clear for windows < 32,
+    tt-kmd/blackhole.c:192-196) but stock ttsim doesn't model them — the write
+    is a fatal UnimplementedFunctionality. Accept and ignore them (the driver
+    only ever writes 0, and strided translation is unused by the port)."""
+    src = open(path).read()
+    if MARK in src:
+        print("libttsim already patched")
+        return
+
+    anchor = """                case 0x1FC00000 ... 0x1FC009D4:
+                    TTSIM_VERIFY(!(offset & 3), UnsupportedFunctionality, "bar0: misaligned offset=0x%x", offset);
+                    TTSIM_VERIFY(size == 4, UnsupportedFunctionality, "bar0: offset=0x%x size=%d", offset, size);
+                    tlb_cfg_wr32((offset - 0x1FC00000) / 4, mem_rd<uint32_t>(p));
+                    break;"""
+    if src.count(anchor) != 1:
+        sys.exit("ANCHOR MISSING: BH tlb_cfg write case in libttsim.cpp")
+    src = src.replace(anchor, anchor + f"""
+                case 0x1FC009D8 ... 0x1FC00A57: // strided TLB regs ({MARK})
+                    TTSIM_VERIFY(size == 4 && mem_rd<uint32_t>(p) == 0, UnimplementedFunctionality,
+                        "strided tlb cfg: offset=0x%x size=%d", offset, size);
+                    break;""")
+    open(path, "w").write(src)
+    print("patched", path)
+
+
 def patch(path: str) -> None:
     src = open(path).read()
     if MARK in src:
@@ -71,4 +98,7 @@ def patch(path: str) -> None:
 
 
 if __name__ == "__main__":
-    patch(sys.argv[1] if len(sys.argv) > 1 else "src/tile.cpp")
+    import os
+    base = os.path.dirname(sys.argv[1] if len(sys.argv) > 1 else "src/tile.cpp")
+    patch(os.path.join(base, "tile.cpp"))
+    patch_libttsim(os.path.join(base, "libttsim.cpp"))
