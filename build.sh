@@ -37,6 +37,6 @@ powershell.exe "${PS_ARGS[@]}"
 OUT="$REPO_DIR/out/$CONFIG"
 mkdir -p "$OUT"
 SRC="$STAGE_WSL/src/driver/x64/$CONFIG"
-find "$SRC" \( -name 'ttkmd.sys' -o -name 'ttkmd.inf' -o -name '*.cat' -o -name 'ttkmd.pdb' \) \
+find "$SRC" \( -name 'ttkmd.sys' -o -name 'ttkmd.inf' -o -name '*.cat' -o -name 'ttkmd.pdb' -o -name 'tt-test.cer' \) \
     -exec cp -v {} "$OUT/" \;
 echo "Artifacts in $OUT"
