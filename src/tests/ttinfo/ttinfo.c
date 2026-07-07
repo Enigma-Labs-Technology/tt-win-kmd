@@ -262,12 +262,318 @@ static void TestM2Firmware(HANDLE h, int deviceId)
     printf("arc: TEST round-trip ok (response header=0)\n");
 }
 
-int wmain(void)
+// M3: TLB windows, MAP/UNMAP, DMA buffers, pin pages (vs ttsim Blackhole).
+static void TestM3Memory(HANDLE h, int deviceId)
+{
+    struct tenstorrent_allocate_tlb at;
+    struct tenstorrent_configure_tlb ct;
+    struct tenstorrent_free_tlb ft;
+    struct tenstorrent_allocate_dma_buf ab;
+    struct tenstorrent_map mp;
+    struct tenstorrent_unmap um;
+    struct tenstorrent_pin_pages pp;
+    struct tenstorrent_unpin_pages up;
+    DWORD info;
+    BOOL ok;
+    uint32_t tlbId;
+    uint64_t tlbUcToken;
+    volatile uint32_t *va;
+    void *pinBuf;
+
+    if (deviceId != 0xB140) {
+        return;   // needs the Blackhole TLB/DMA hardware model
+    }
+
+    // --- TLB allocate: wrong size rejected, 2M accepted -------------------
+    memset(&at, 0, sizeof(at));
+    at.in.size = 1 << 20;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_TLB, &at, sizeof(at), sizeof(at), &info);
+    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+          "tlb wrong size: ok=%d gle=%lu\n", ok, GetLastError());
+
+    memset(&at, 0, sizeof(at));
+    at.in.size = 2 << 20;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_TLB, &at, sizeof(at), sizeof(at), &info);
+    CHECK(ok, "tlb alloc failed, gle=%lu\n", GetLastError());
+    tlbId = at.out.id;
+    tlbUcToken = at.out.mmap_offset_uc;
+    CHECK(tlbId < 202, "tlb id=%u\n", tlbId);
+    CHECK(tlbUcToken == (6ull << 36) + (uint64_t)tlbId * (2 << 20),
+          "tlb uc token=%llx\n", (unsigned long long)tlbUcToken);
+    CHECK(at.out.mmap_offset_wc == (7ull << 36) + (uint64_t)tlbId * (2 << 20),
+          "tlb wc token=%llx\n", (unsigned long long)at.out.mmap_offset_wc);
+
+    // --- Configure to ARC CSM; unaligned rejected -------------------------
+    memset(&ct, 0, sizeof(ct));
+    ct.in.id = tlbId;
+    ct.in.config.addr = 0x10000000ull;   // ARC CSM base (2M aligned)
+    ct.in.config.x_end = 8;              // ARC tile (8,0)
+    ct.in.config.ordering = 1;           // strict
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info);
+    CHECK(ok, "tlb configure failed, gle=%lu\n", GetLastError());
+
+    ct.in.config.addr = 0x10000000ull + 4096;   // not window-aligned
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info);
+    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+          "tlb cfg unaligned: ok=%d gle=%lu\n", ok, GetLastError());
+
+    ct.in.id = tlbId + 1;                // not ours
+    ct.in.config.addr = 0x10000000ull;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info);
+    CHECK(!ok && GetLastError() == ERROR_ACCESS_DENIED,
+          "tlb cfg foreign: ok=%d gle=%lu\n", ok, GetLastError());
+
+    // --- MAP the window (UC), read simulated CSM through user VA ----------
+    memset(&mp, 0, sizeof(mp));
+    mp.in.mmap_offset = tlbUcToken;
+    mp.in.length = 2 << 20;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
+    CHECK(ok, "MAP tlb failed, gle=%lu\n", GetLastError());
+    va = (volatile uint32_t *)(uintptr_t)mp.out.user_va;
+    CHECK(va != NULL, "MAP returned null va\n");
+    // CSM+0x100 = ttsim telemetry table: word0 = version 1
+    CHECK(va[0x100 / 4] == 1, "csm telemetry version via user map = %u\n",
+          va[0x100 / 4]);
+    printf("tlb window: user VA reads CSM (telemetry version %u)\n", va[0x100 / 4]);
+
+    // FREE while mapped -> EBUSY; UNMAP; FREE ok
+    memset(&ft, 0, sizeof(ft));
+    ft.in.id = tlbId;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_TLB, &ft, sizeof(ft), sizeof(ft), &info);
+    CHECK(!ok && GetLastError() == ERROR_BUSY,
+          "free-while-mapped: ok=%d gle=%lu\n", ok, GetLastError());
+
+    memset(&um, 0, sizeof(um));
+    um.in.user_va = mp.out.user_va;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_UNMAP, &um, sizeof(um), sizeof(um), &info);
+    CHECK(ok, "UNMAP failed, gle=%lu\n", GetLastError());
+
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_TLB, &ft, sizeof(ft), sizeof(ft), &info);
+    CHECK(ok, "FREE_TLB failed, gle=%lu\n", GetLastError());
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_TLB, &ft, sizeof(ft), sizeof(ft), &info);
+    CHECK(!ok && GetLastError() == ERROR_ACCESS_DENIED,
+          "double free: ok=%d gle=%lu\n", ok, GetLastError());
+
+    // --- Open-BAR pattern: map BAR0 at the window's offset directly -------
+    memset(&at, 0, sizeof(at));
+    at.in.size = 2 << 20;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_TLB, &at, sizeof(at), sizeof(at), &info);
+    CHECK(ok, "tlb re-alloc failed, gle=%lu\n", GetLastError());
+    memset(&ct, 0, sizeof(ct));
+    ct.in.id = at.out.id;
+    ct.in.config.addr = 0x10000000ull;
+    ct.in.config.x_end = 8;
+    ct.in.config.ordering = 1;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info);
+    CHECK(ok, "tlb re-configure failed, gle=%lu\n", GetLastError());
+    memset(&mp, 0, sizeof(mp));
+    mp.in.mmap_offset = (0ull << 36) + (uint64_t)at.out.id * (2 << 20); // BAR0 UC
+    mp.in.length = 2 << 20;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
+    CHECK(ok, "MAP bar0 failed, gle=%lu\n", GetLastError());
+    va = (volatile uint32_t *)(uintptr_t)mp.out.user_va;
+    CHECK(va[0x100 / 4] == 1, "bar0-path csm version=%u\n", va[0x100 / 4]);
+    memset(&um, 0, sizeof(um));
+    um.in.user_va = mp.out.user_va;
+    (void)TtIoctl(h, IOCTL_TENSTORRENT_UNMAP, &um, sizeof(um), sizeof(um), &info);
+    memset(&ft, 0, sizeof(ft));
+    ft.in.id = at.out.id;
+    (void)TtIoctl(h, IOCTL_TENSTORRENT_FREE_TLB, &ft, sizeof(ft), sizeof(ft), &info);
+
+    // --- DMA buffer: validation, alloc, map, write/read, NOC_DMA ----------
+    memset(&ab, 0, sizeof(ab));
+    ab.in.requested_size = 4096 + 1;   // unaligned
+    ab.in.buf_index = 0;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_DMA_BUF, &ab, sizeof(ab), sizeof(ab), &info);
+    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+          "dmabuf unaligned: ok=%d gle=%lu\n", ok, GetLastError());
+
+    memset(&ab, 0, sizeof(ab));
+    ab.in.requested_size = 64 * 1024;
+    ab.in.buf_index = 0;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_DMA_BUF, &ab, sizeof(ab), sizeof(ab), &info);
+    CHECK(ok, "dmabuf alloc failed, gle=%lu\n", GetLastError());
+    CHECK(ab.out.physical_address != 0, "dmabuf phys=0\n");
+    CHECK(ab.out.mapping_offset == 0xF000000000ull, "dmabuf token=%llx\n",
+          (unsigned long long)ab.out.mapping_offset);
+    CHECK(ab.out.size == 64 * 1024, "dmabuf size=%u\n", ab.out.size);
+
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_DMA_BUF, &ab, sizeof(ab), sizeof(ab), &info);
+    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+          "dmabuf dup index: ok=%d gle=%lu\n", ok, GetLastError());
+
+    memset(&mp, 0, sizeof(mp));
+    mp.in.mmap_offset = 0xF000000000ull;
+    mp.in.length = 64 * 1024;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
+    CHECK(ok, "MAP dmabuf failed, gle=%lu\n", GetLastError());
+    va = (volatile uint32_t *)(uintptr_t)mp.out.user_va;
+    va[0] = 0xDEADBEEF;
+    va[16383] = 0x12345678;
+    CHECK(va[0] == 0xDEADBEEF && va[16383] == 0x12345678,
+          "dmabuf rw mismatch\n");
+    printf("dmabuf: 64K mapped+verified at user VA, bus=%llx\n",
+           (unsigned long long)ab.out.physical_address);
+
+    // NOC_DMA variant on another index
+    memset(&ab, 0, sizeof(ab));
+    ab.in.requested_size = 64 * 1024;
+    ab.in.buf_index = 1;
+    ab.in.flags = TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_DMA_BUF, &ab, sizeof(ab), sizeof(ab), &info);
+    CHECK(ok, "dmabuf noc alloc failed, gle=%lu\n", GetLastError());
+    CHECK(ab.out.noc_address >= (4ull << 58), "noc_address=%llx\n",
+          (unsigned long long)ab.out.noc_address);
+    printf("dmabuf: NOC DMA via iATU, noc=%llx\n",
+           (unsigned long long)ab.out.noc_address);
+
+    // FREE_DMA_BUF: upstream stub -EINVAL
+    {
+        DWORD zero = 0;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF, &zero, 0, 0, &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "FREE_DMA_BUF: ok=%d gle=%lu\n", ok, GetLastError());
+    }
+
+    // --- PIN_PAGES: single page positive + negatives ----------------------
+    pinBuf = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    CHECK(pinBuf != NULL, "VirtualAlloc failed\n");
+    memset(pinBuf, 0xAB, 4096);
+
+    memset(&pp, 0, sizeof(pp));
+    pp.in.output_size_bytes = sizeof(struct tenstorrent_pin_pages_out_extended);
+    pp.in.virtual_address = (uint64_t)(uintptr_t)pinBuf;
+    pp.in.size = 4096;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &pp, sizeof(pp), sizeof(pp), &info);
+    CHECK(ok, "pin failed, gle=%lu\n", GetLastError());
+    CHECK(pp.out.physical_address != 0, "pin phys=0\n");
+    printf("pin: 4K page at phys=%llx\n",
+           (unsigned long long)pp.out.physical_address);
+
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &pp, sizeof(pp), sizeof(pp), &info);
+    CHECK(!ok && GetLastError() == ERROR_ALREADY_EXISTS,
+          "dup pin: ok=%d gle=%lu\n", ok, GetLastError());
+
+    memset(&up, 0, sizeof(up));
+    up.in.virtual_address = (uint64_t)(uintptr_t)pinBuf;
+    up.in.size = 8192;   // wrong size
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_UNPIN_PAGES, &up, sizeof(up), sizeof(up), &info);
+    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+          "unpin wrong size: ok=%d gle=%lu\n", ok, GetLastError());
+
+    up.in.size = 4096;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_UNPIN_PAGES, &up, sizeof(up), sizeof(up), &info);
+    CHECK(ok, "unpin failed, gle=%lu\n", GetLastError());
+
+    memset(&pp, 0, sizeof(pp));
+    pp.in.output_size_bytes = sizeof(struct tenstorrent_pin_pages_out);
+    pp.in.virtual_address = (uint64_t)(uintptr_t)pinBuf;
+    pp.in.size = 4096;
+    pp.in.flags = TENSTORRENT_PIN_PAGES_READ_ONLY;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &pp, sizeof(pp), sizeof(pp), &info);
+    CHECK(!ok && GetLastError() == ERROR_NOT_SUPPORTED,
+          "pin RO: ok=%d gle=%lu\n", ok, GetLastError());
+
+    pp.in.flags = 0;
+    pp.in.virtual_address += 1;   // misaligned
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &pp, sizeof(pp), sizeof(pp), &info);
+    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+          "pin misaligned: ok=%d gle=%lu\n", ok, GetLastError());
+
+    VirtualFree(pinBuf, 0, MEM_RELEASE);
+    // dmabufs/maps intentionally left live: cleanup-on-close covers them.
+}
+
+// 10,000-cycle open/alloc/map/pin/close soak (M3 acceptance: no leaks).
+static int RunSoak(const WCHAR *path, int cycles)
+{
+    int i;
+
+    for (i = 0; i < cycles; i++) {
+        HANDLE h;
+        struct tenstorrent_allocate_tlb at;
+        struct tenstorrent_configure_tlb ct;
+        struct tenstorrent_allocate_dma_buf ab;
+        struct tenstorrent_map mp;
+        struct tenstorrent_pin_pages pp;
+        void *pinBuf;
+        DWORD info;
+
+        h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_EXISTING, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            printf("soak %d: open gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+
+        memset(&at, 0, sizeof(at));
+        at.in.size = 2 << 20;
+        if (!TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_TLB, &at, sizeof(at), sizeof(at), &info)) {
+            printf("soak %d: tlb gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+        memset(&ct, 0, sizeof(ct));
+        ct.in.id = at.out.id;
+        ct.in.config.addr = 0x10000000ull;
+        ct.in.config.x_end = 8;
+        ct.in.config.ordering = 1;
+        if (!TtIoctl(h, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info)) {
+            printf("soak %d: cfg gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+        memset(&mp, 0, sizeof(mp));
+        mp.in.mmap_offset = at.out.mmap_offset_uc;
+        mp.in.length = 2 << 20;
+        if (!TtIoctl(h, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info)) {
+            printf("soak %d: map gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+        if (*(volatile uint32_t *)(uintptr_t)(mp.out.user_va + 0x100) != 1) {
+            printf("soak %d: csm readback mismatch\n", i);
+            return 1;
+        }
+        memset(&ab, 0, sizeof(ab));
+        ab.in.requested_size = 64 * 1024;
+        ab.in.buf_index = 3;
+        ab.in.flags = TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA;
+        if (!TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_DMA_BUF, &ab, sizeof(ab), sizeof(ab), &info)) {
+            printf("soak %d: dmabuf gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+        pinBuf = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        memset(pinBuf, 1, 4096);
+        memset(&pp, 0, sizeof(pp));
+        pp.in.output_size_bytes = sizeof(struct tenstorrent_pin_pages_out);
+        pp.in.virtual_address = (uint64_t)(uintptr_t)pinBuf;
+        pp.in.size = 4096;
+        if (!TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &pp, sizeof(pp), sizeof(pp), &info)) {
+            printf("soak %d: pin gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+
+        CloseHandle(h);   // cleanup-on-close tears down everything
+        VirtualFree(pinBuf, 0, MEM_RELEASE);
+
+        if ((i + 1) % 1000 == 0) {
+            printf("soak: %d cycles\n", i + 1);
+        }
+    }
+    printf("soak: %d cycles PASS\n", cycles);
+    return 0;
+}
+
+int wmain(int argc, wchar_t **argv)
 {
     WCHAR *list, *path;
     ULONG len = 0;
     int devices = 0;
+    int soakCycles = 0;
     CONFIGRET cr;
+
+    if (argc >= 3 && wcscmp(argv[1], L"--soak") == 0) {
+        soakCycles = _wtoi(argv[2]);
+    }
 
     cr = CM_Get_Device_Interface_List_SizeW(
         &len, (LPGUID)&GUID_DEVINTERFACE_TENSTORRENT, NULL,
@@ -301,12 +607,26 @@ int wmain(void)
             printf("FAIL: CreateFile gle=%lu\n", GetLastError());
             continue;
         }
+        if (soakCycles > 0) {
+            CloseHandle(h);
+            if (wcsstr(path, L"PCI#VEN_1E52") != NULL) {
+                return RunSoak(path, soakCycles);
+            }
+            continue;
+        }
+
         TestDriverInfo(h);
         TestDeviceInfo(h, &isRealDevice, &deviceId);
         TestQueryMappings(h, isRealDevice);
         TestNegative(h);
         TestM2Firmware(h, deviceId);
+        TestM3Memory(h, deviceId);
         CloseHandle(h);
+    }
+
+    if (soakCycles > 0) {
+        printf("soak: no PCI device found\n");
+        return 2;
     }
 
     printf("\nttinfo: %d device(s), %d failure(s)\n", devices, g_failures);
