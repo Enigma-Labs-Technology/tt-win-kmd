@@ -48,14 +48,14 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | 5 | GET_DRIVER_INFO | `0x80FA2014` | `tenstorrent_get_driver_info` (4/12/16) | BUFFERED | baseline | **tested** (M1) |
 | 6 | RESET_DEVICE | `0x80FA2018` | `tenstorrent_reset_device` (8/8/16) | BUFFERED | 7-flavor dispatch; out.result=!ok; gen-bump → STATUS_DEVICE_REMOVED on stale handles; needs_hw_init window; VMA-zap (DD-9) | **tested** (M4) |
 | 7 | PIN_PAGES | `0x80FA201C` | `tenstorrent_pin_pages` (24/8/32); extended out (16) via output_size_bytes | BUFFERED | MmProbeAndLockPages + PFN-contiguity (direct path); READ_ONLY→NOT_SUPPORTED (no driver IOMMU domain, DD-8) | **functional** (M3; direct path tested, RO negative) |
-| 8 | LOCK_CTL | `0x80FA2020` | `tenstorrent_lock_ctl` (12/4/16) | BUFFERED | ACQUIRE_BLOCKING pends the IRP; cancel → STATUS_CANCELLED (mirrors -EINTR) | not-started |
+| 8 | LOCK_CTL | `0x80FA2020` | `tenstorrent_lock_ctl` (12/4/16) | BUFFERED | 64 locks; ACQUIRE_BLOCKING = cancellable pended request (manual WDFQUEUE); stale-gen/detached waiter → STATUS_DEVICE_REMOVED; CancelSynchronousIo → STATUS_CANCELLED | **tested** (M5) |
 | 9 | MAP_PEER_BAR | `0x80FA2024` | `tenstorrent_map_peer_bar` (24/16/40) | BUFFERED | `peer_fd` (u32) carries a Windows HANDLE value of the peer device file; resolved via ObReferenceObjectByHandle — 64-bit handle truncation concern, see OQ (to file) | not-started |
 | 10 | UNPIN_PAGES | `0x80FA2028` | `tenstorrent_unpin_pages` (24/0/24) | BUFFERED | exact VA+size match; MmUnlockPages dirties write-locked pages | **functional** (M3) |
 | 11 | ALLOCATE_TLB | `0x80FA202C` | `tenstorrent_allocate_tlb` (16/32/48) | BUFFERED | exact-size pool (no round-up); single-owner; token encoding memory.c:924-934 | **tested** (M3) |
 | 12 | FREE_TLB | `0x80FA2030` | `tenstorrent_free_tlb` (4/0/4) | BUFFERED | -EPERM if not owner, -EBUSY if mapped (memory.c:955-976) | **tested** (M3) |
 | 13 | CONFIGURE_TLB | `0x80FA2034` | `tenstorrent_configure_tlb` (40/8/48); config 32 B | BUFFERED | -EPERM if not owner; 2M/4G register composition (blackhole.c:112-198) | **tested** (M3) |
 | 14 | SET_NOC_CLEANUP | `0x80FA2038` | `tenstorrent_set_noc_cleanup` (32, argsz protocol) | BUFFERED | baseline | not-started |
-| 15 | SET_POWER_STATE | `0x80FA203C` | `tenstorrent_power_state` (40, argsz protocol) | BUFFERED | baseline | not-started |
+| 15 | SET_POWER_STATE | `0x80FA203C` | `tenstorrent_power_state` (40, argsz protocol) | BUFFERED | multi-client aggregate (flags OR + unspecified-ON, settings max) → ARC POWER_SETTING; argsz/flags/validity validation | **tested** (M5) |
 | 16 | EXPORT_TLB_DMABUF | `0x80FA2040` | `tenstorrent_export_tlb_dmabuf` (32, argsz protocol) | BUFFERED | **design-pending:** dma-buf fd has no Windows equivalent; Linux consumer is RDMA P2P (`ibv_reg_dmabuf_mr`). Candidate: not supported initially → STATUS_NOT_SUPPORTED, revisit if tt-umd-on-Windows needs it | not-started |
 
 ## Windows-only extensions (no Linux nr; function codes from 0x900)
@@ -64,6 +64,7 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 |---|---|---|---|---|
 | IOCTL_TENSTORRENT_MAP | `0x80FA2400` | Map a BAR range/DMA buf/TLB window into caller VA (token + byte offset + length → user VA) | `mmap(fd, offset)` | **tested** (M3, DD-8) |
 | IOCTL_TENSTORRENT_UNMAP | `0x80FA2404` | Unmap a prior MAP by VA | `munmap` | **tested** (M3, DD-8) |
+| IOCTL_TENSTORRENT_QUERY_TELEMETRY | `0x80FA2408` | hwmon-equivalent telemetry (exact Linux names/units/scaling; present-mask) | sysfs/hwmon nodes | **tested** (M5, DD-10) |
 | IOCTL_TENSTORRENT_SET_CLIENT_FLAGS | `0x80FA2408` | Declares power-aware client immediately after open | `open(..., O_APPEND)` | design-pending (analysis §03) |
 | IOCTL_TENSTORRENT_QUERY_STABLE_ID | `0x80FA240C` | ASIC-ID-based stable identity | `/dev/tenstorrent/by-id/*` udev symlinks | design-pending (analysis §01 naming scheme) |
 
@@ -73,6 +74,7 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 |---|---|---|---|---|
 | IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY | `0x80FA2800` | Read one telemetry tag (errno parity with read_telemetry_tag: ≥128 → INVALID_PARAMETER, absent → NOT_FOUND) | debugfs/telemetry inspection | **tested** (M2) |
 | IOCTL_TENSTORRENT_DEBUG_ARC_MSG | `0x80FA2804` | Synchronous ARC message round-trip (send_arc_message contract) | debugfs-style poke | **tested** (M2, TEST 0x90 vs ttsim) |
+| IOCTL_TENSTORRENT_DEBUG_GET_AGG_POWER | `0x80FA2808` | Read back the aggregated power state (verifies SET_POWER_STATE aggregation) | n/a | **tested** (M5) |
 
 **Rules:** rows change status only in the same commit as the code they describe.
 Every `design-pending` must resolve to a documented design (DD-N) before its
