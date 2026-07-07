@@ -80,3 +80,9 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 Every `design-pending` must resolve to a documented design (DD-N) before its
 milestone completes. GET_HARVESTING's struct is not defined in `ioctl.h` — filled
 in from the analysis (chardev.c handler) before M1 code.
+
+## User-mode compatibility shim (M6)
+
+`ttwin_compat` exposes tt_open/tt_ioctl/tt_mmap/tt_munmap/tt_close over the
+above IOCTLs with the Linux request constants and structs unchanged; `ttconform`
+exercises every implemented IOCTL through it. See docs/tt-umd-porting-notes.md.
