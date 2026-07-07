@@ -209,3 +209,42 @@ the gate then returns STATUS_DEVICE_REMOVED for everything. iATU teardown alread
 skips hardware writes when Detached (M3). Test-rig glue models the chip reset by
 clearing the PCI_COMMAND parity marker when the interface-timer-interrupt fires,
 so POST_RESET's marker check succeeds.
+
+## DD-10: M5 telemetry / power / locks design
+
+**LOCK_CTL blocking acquire → manual WDFQUEUE (the novel mechanic).** 64 device
+locks: a device 64-bit "held" bitmap + a per-file "held-by-me" bitmap, guarded
+by a device WDFWAITLOCK (invariant: global bit set whenever any local bit set,
+chardev.c:369-370). ACQUIRE/RELEASE/TEST are immediate bit ops. ACQUIRE_BLOCKING
+that can't win is forwarded to a manual queue (WdfRequestForwardToIoQueue) — WDF
+makes it cancellable and auto-completes it STATUS_CANCELLED on CancelIo / handle
+close (replacing Linux -ERESTARTSYS). Wakers (RELEASE, file cleanup, RESET
+gen-bump, surprise removal) drain the wait queue under the device lock: each
+waiter is retried; winners complete value=1, stale-gen/detached waiters complete
+STATUS_DEVICE_REMOVED (Linux -ENODEV), the rest are re-forwarded. Locks survive
+reset and are released only at handle close (chardev.c:312-316 parity). This
+avoids Linux's "drop reset_rwsem during the wait" hazard entirely: the request
+pends outside any lock, so a blocked waiter never holds up reset/removal.
+
+**SET_POWER_STATE multi-client aggregation.** Each file object stores its
+`tenstorrent_power_state` contribution. Any change — plus file create (legacy
+default: all flags on except MAX_AI_CLK) and close — re-aggregates across every
+live file object (the M4 device FileList): flags OR-ed with the "unspecified
+flags default ON" rule (`unspecified = ~((1<<flags_count)-1) & 0x7FFF`,
+chardev.c:29,509 — old clients can't disable features they don't know),
+settings by max, stale-gen fds skipped. The result is sent to firmware as an ARC
+POWER_SETTING (0x21) message. The O_APPEND power-aware-client signal maps to a
+SET_CLIENT_FLAGS-style opt-in: default create is legacy; the aggregated state is
+also read-back via a debug ioctl for test verification (firmware doesn't echo it).
+
+**Telemetry (hwmon-equivalent) query.** Windows has no hwmon; a Windows-extension
+IOCTL_TENSTORRENT_QUERY_TELEMETRY returns a struct of the scaled sensor values
+with a "present" bitmask (absent tags hidden, hwmon is_visible parity). Field
+scaling is byte-identical to the Linux hwmon ABI so tooling ports mechanically:
+temp m°C (tag 11 16.16-fixed → *1000/65536; tag 56 *1000), voltage mV (tags 6,
+9-upper-16 as-is), current mA (tags 8, 55 *1000), power µW (tags 7, 64
+*1000000), fan RPM (tag 41), and the tt_* sysfs values (aiclk/axiclk/arcclk MHz
+tags 14-16, tt_heartbeat 32, tt_therm_trip_count 60, tt_asic_id u64 61:62,
+tt_serial u64 1:2, tt_fw_bundle_ver 28). The exact Linux names are documented per
+field in the header. The BH/WH hwmon label difference (asic_temp vs asic1_temp)
+is a naming-only concern deferred until a WH device exists.
