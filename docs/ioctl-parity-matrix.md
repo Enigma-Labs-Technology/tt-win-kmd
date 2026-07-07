@@ -54,7 +54,7 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | 11 | ALLOCATE_TLB | `0x80FA202C` | `tenstorrent_allocate_tlb` (16/32/48) | BUFFERED | exact-size pool (no round-up); single-owner; token encoding memory.c:924-934 | **tested** (M3) |
 | 12 | FREE_TLB | `0x80FA2030` | `tenstorrent_free_tlb` (4/0/4) | BUFFERED | -EPERM if not owner, -EBUSY if mapped (memory.c:955-976) | **tested** (M3) |
 | 13 | CONFIGURE_TLB | `0x80FA2034` | `tenstorrent_configure_tlb` (40/8/48); config 32 B | BUFFERED | -EPERM if not owner; 2M/4G register composition (blackhole.c:112-198) | **tested** (M3) |
-| 14 | SET_NOC_CLEANUP | `0x80FA2038` | `tenstorrent_set_noc_cleanup` (32, argsz protocol) | BUFFERED | baseline | not-started |
+| 14 | SET_NOC_CLEANUP | `0x80FA2038` | `tenstorrent_set_noc_cleanup` (32, argsz protocol) | BUFFERED | per-handle NOC write at close (skipped if detached); argsz/noc/addr-align/x-y validation | **tested** (M6) |
 | 15 | SET_POWER_STATE | `0x80FA203C` | `tenstorrent_power_state` (40, argsz protocol) | BUFFERED | multi-client aggregate (flags OR + unspecified-ON, settings max) → ARC POWER_SETTING; argsz/flags/validity validation | **tested** (M5) |
 | 16 | EXPORT_TLB_DMABUF | `0x80FA2040` | `tenstorrent_export_tlb_dmabuf` (32, argsz protocol) | BUFFERED | **design-pending:** dma-buf fd has no Windows equivalent; Linux consumer is RDMA P2P (`ibv_reg_dmabuf_mr`). Candidate: not supported initially → STATUS_NOT_SUPPORTED, revisit if tt-umd-on-Windows needs it | not-started |
 
