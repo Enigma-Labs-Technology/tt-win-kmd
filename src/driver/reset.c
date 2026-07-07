@@ -229,6 +229,13 @@ TtBumpResetGen(
     if (FileObject != NULL) {
         TtGetFileContext(FileObject)->OpenResetGen = gen;
     }
+
+    // Wake blocking lock waiters so stale-gen fds fail -ENODEV instead of
+    // waiting forever (chardev.c:295-299 parity). Resource locks themselves
+    // survive reset (chardev.c:312-316) — only close() clears the bits.
+    WdfWaitLockAcquire(Context->LockLock, NULL);
+    TtLocksWakeWaiters(Context);
+    WdfWaitLockRelease(Context->LockLock);
 }
 
 // ---------------------------------------------------------------------------

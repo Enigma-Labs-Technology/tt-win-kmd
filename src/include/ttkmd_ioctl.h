@@ -69,6 +69,10 @@ typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
+typedef signed char int8_t;
+typedef short int16_t;
+typedef int int32_t;
+typedef long long int64_t;
 #else
 #include <stdint.h>
 #endif
@@ -263,6 +267,48 @@ struct tenstorrent_configure_tlb {
     struct tenstorrent_configure_tlb_out out;
 };
 
+// --- LOCK_CTL (nr 8), tt-kmd/ioctl.h:210-249 ---
+#define TENSTORRENT_LOCK_CTL_ACQUIRE 0          // out.value: 1=acquired, 0=held by another
+#define TENSTORRENT_LOCK_CTL_RELEASE 1          // out.value: 1=released, 0=not held by us
+#define TENSTORRENT_LOCK_CTL_TEST 2             // out.value: bit0=held by us, bit1=held by any
+#define TENSTORRENT_LOCK_CTL_ACQUIRE_BLOCKING 3 // blocks until acquired, out.value: 1
+#define TENSTORRENT_RESOURCE_LOCK_COUNT 64
+
+struct tenstorrent_lock_ctl_in {
+    uint32_t output_size_bytes;
+    uint32_t flags;            // TENSTORRENT_LOCK_CTL_*
+    uint8_t index;             // [0, 64)
+    uint8_t reserved[3];
+};
+
+struct tenstorrent_lock_ctl_out {
+    uint8_t value;
+    uint8_t reserved[3];
+};
+
+struct tenstorrent_lock_ctl {
+    struct tenstorrent_lock_ctl_in in;
+    struct tenstorrent_lock_ctl_out out;
+};
+
+// --- SET_POWER_STATE (nr 15), tt-kmd/ioctl.h:361-411 ---
+#define TT_POWER_VALIDITY_FLAGS(n)    (((n) & 0xF) << 0)
+#define TT_POWER_VALIDITY_SETTINGS(n) (((n) & 0xF) << 4)
+#define TT_POWER_VALIDITY(f, s) (TT_POWER_VALIDITY_FLAGS(f) | TT_POWER_VALIDITY_SETTINGS(s))
+#define TT_POWER_FLAG_MAX_AI_CLK       (1u << 0)
+#define TT_POWER_FLAG_MRISC_PHY_WAKEUP (1u << 1)
+#define TT_POWER_FLAG_TENSIX_ENABLE    (1u << 2)
+#define TT_POWER_FLAG_L2CPU_ENABLE     (1u << 3)
+
+struct tenstorrent_power_state {
+    uint32_t argsz;            // must == sizeof(struct) = 40
+    uint32_t flags;            // must == 0
+    uint8_t reserved0;         // must == 0
+    uint8_t validity;          // TT_POWER_VALIDITY(flags_count, settings_count)
+    uint16_t power_flags;      // TT_POWER_FLAG_*
+    uint16_t power_settings[14];
+};
+
 // --- RESET_DEVICE (nr 6), tt-kmd/ioctl.h:142-166 ---
 // flags is an enum value, not a bitmask (chardev.c dispatches with == chains).
 #define TENSTORRENT_RESET_DEVICE_RESTORE_STATE 0
@@ -299,6 +345,52 @@ struct tenstorrent_reset_device {
 
 #define IOCTL_TENSTORRENT_MAP   TT_CTL_EXT(0)
 #define IOCTL_TENSTORRENT_UNMAP TT_CTL_EXT(1)
+
+// Telemetry query (hwmon-equivalent; Windows has no hwmon). Values use the
+// EXACT Linux hwmon ABI scaling/units so tooling ports mechanically. Each
+// field's `present` bit is set only if the underlying firmware tag exists
+// (hwmon is_visible parity — absent tags are hidden on Linux).
+#define IOCTL_TENSTORRENT_QUERY_TELEMETRY TT_CTL_EXT(2)
+
+// present-mask bits
+#define TT_TELEM_PRESENT_TEMP        (1u << 0)   // temp1_input/_max
+#define TT_TELEM_PRESENT_VCORE       (1u << 1)   // in0_input/_max
+#define TT_TELEM_PRESENT_CURRENT     (1u << 2)   // curr1_input/_max
+#define TT_TELEM_PRESENT_POWER       (1u << 3)   // power1_input/_max
+#define TT_TELEM_PRESENT_FAN         (1u << 4)   // fan1_input (BH only)
+#define TT_TELEM_PRESENT_AICLK       (1u << 5)   // tt_aiclk
+#define TT_TELEM_PRESENT_AXICLK      (1u << 6)   // tt_axiclk
+#define TT_TELEM_PRESENT_ARCCLK      (1u << 7)   // tt_arcclk
+#define TT_TELEM_PRESENT_HEARTBEAT   (1u << 8)   // tt_heartbeat
+#define TT_TELEM_PRESENT_THERMTRIP   (1u << 9)   // tt_therm_trip_count (BH)
+#define TT_TELEM_PRESENT_ASIC_ID     (1u << 10)  // tt_asic_id
+#define TT_TELEM_PRESENT_SERIAL      (1u << 11)  // tt_serial / board id
+#define TT_TELEM_PRESENT_FW_BUNDLE   (1u << 12)  // tt_fw_bundle_ver
+
+struct tenstorrent_query_telemetry_out {
+    uint32_t present;          // TT_TELEM_PRESENT_* bitmask
+    int32_t  temp_input_mc;    // temp1_input, milli-degC (tag 11, 16.16 fixed)
+    int32_t  temp_max_mc;      // temp1_max, milli-degC (tag 56)
+    uint32_t vcore_input_mv;   // in0_input, mV (tag 6)
+    uint32_t vcore_max_mv;     // in0_max, mV (tag 9 upper 16)
+    uint32_t curr_input_ma;    // curr1_input, mA (tag 8)
+    uint32_t curr_max_ma;      // curr1_max, mA (tag 55)
+    uint32_t power_input_uw;   // power1_input, microwatts (tag 7)
+    uint32_t power_max_uw;     // power1_max, microwatts (tag 64)
+    uint32_t fan_rpm;          // fan1_input, RPM (tag 41)
+    uint32_t aiclk_mhz;        // tt_aiclk (tag 14)
+    uint32_t axiclk_mhz;       // tt_axiclk (tag 15)
+    uint32_t arcclk_mhz;       // tt_arcclk (tag 16)
+    uint32_t heartbeat;        // tt_heartbeat (tag 32)
+    uint32_t therm_trip_count; // tt_therm_trip_count (tag 60)
+    uint32_t fw_bundle_ver;    // tt_fw_bundle_ver (tag 28)
+    uint64_t asic_id;          // tt_asic_id (tags 61<<32 | 62)
+    uint64_t serial;           // tt_serial / board id (tags 1<<32 | 2)
+};
+
+struct tenstorrent_query_telemetry {
+    struct tenstorrent_query_telemetry_out out;
+};
 
 struct tenstorrent_map_in {
     uint64_t mmap_offset;      // token + byte offset (page-aligned)

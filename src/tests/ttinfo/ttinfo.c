@@ -484,6 +484,199 @@ static void TestM3Memory(HANDLE h, int deviceId)
     // dmabufs/maps intentionally left live: cleanup-on-close covers them.
 }
 
+// Background blocking-acquire: blocks in the driver until the lock frees.
+struct BlockingLockArg {
+    HANDLE h;
+    BYTE index;
+    volatile LONG completed;
+    BYTE value;
+    DWORD gle;
+};
+
+static DWORD WINAPI BlockingLockThread(LPVOID param)
+{
+    struct BlockingLockArg *a = (struct BlockingLockArg *)param;
+    struct tenstorrent_lock_ctl lc;
+    DWORD info;
+    BOOL ok;
+
+    memset(&lc, 0, sizeof(lc));
+    lc.in.flags = TENSTORRENT_LOCK_CTL_ACQUIRE_BLOCKING;
+    lc.in.index = a->index;
+    ok = DeviceIoControl(a->h, IOCTL_TENSTORRENT_LOCK_CTL, &lc, sizeof(lc),
+                         &lc, sizeof(lc), &info, NULL);
+    a->value = lc.out.value;
+    a->gle = ok ? 0 : GetLastError();
+    InterlockedExchange(&a->completed, 1);
+    return 0;
+}
+
+// M5: telemetry query, power aggregation, lock control (incl. blocking).
+static void TestM5(const WCHAR *path, HANDLE h, int deviceId)
+{
+    struct tenstorrent_query_telemetry qt;
+    struct tenstorrent_lock_ctl lc;
+    struct tenstorrent_power_state ps;
+    struct tenstorrent_debug_agg_power agg;
+    DWORD info;
+    BOOL ok;
+
+    if (deviceId != 0xB140) {
+        return;
+    }
+
+    // --- Telemetry query (hwmon-equivalent scaling) ----------------------
+    memset(&qt, 0, sizeof(qt));
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_QUERY_TELEMETRY, &qt, sizeof(qt), sizeof(qt), &info);
+    CHECK(ok, "QUERY_TELEMETRY gle=%lu\n", GetLastError());
+    CHECK(qt.out.present & TT_TELEM_PRESENT_AICLK, "aiclk not present\n");
+    CHECK(qt.out.aiclk_mhz == 1000, "aiclk=%u (want 1000)\n", qt.out.aiclk_mhz);
+    CHECK(qt.out.present & TT_TELEM_PRESENT_SERIAL, "serial not present\n");
+    // ttsim board id: high=0x400 (P150), low=0x1.
+    CHECK(qt.out.serial == ((uint64_t)0x400 << 32 | 0x1),
+          "serial=%llx\n", (unsigned long long)qt.out.serial);
+    CHECK(qt.out.present & TT_TELEM_PRESENT_HEARTBEAT, "heartbeat not present\n");
+    printf("telemetry: aiclk=%uMHz serial=%llx heartbeat=%u fw_bundle=%#x\n",
+           qt.out.aiclk_mhz, (unsigned long long)qt.out.serial,
+           qt.out.heartbeat, qt.out.fw_bundle_ver);
+
+    // --- LOCK_CTL: acquire / test / release / re-acquire -----------------
+    memset(&lc, 0, sizeof(lc));
+    lc.in.flags = TENSTORRENT_LOCK_CTL_ACQUIRE;
+    lc.in.index = 5;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_LOCK_CTL, &lc, sizeof(lc), sizeof(lc), &info);
+    CHECK(ok && lc.out.value == 1, "lock5 acquire value=%u\n", lc.out.value);
+
+    lc.in.flags = TENSTORRENT_LOCK_CTL_TEST;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_LOCK_CTL, &lc, sizeof(lc), sizeof(lc), &info);
+    CHECK(ok && lc.out.value == 3, "lock5 test after acquire value=%u\n", lc.out.value);
+
+    lc.in.index = 6;   // free
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_LOCK_CTL, &lc, sizeof(lc), sizeof(lc), &info);
+    CHECK(ok && lc.out.value == 0, "lock6 test free value=%u\n", lc.out.value);
+
+    lc.in.flags = TENSTORRENT_LOCK_CTL_RELEASE;
+    lc.in.index = 5;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_LOCK_CTL, &lc, sizeof(lc), sizeof(lc), &info);
+    CHECK(ok && lc.out.value == 1, "lock5 release value=%u\n", lc.out.value);
+
+    lc.in.flags = TENSTORRENT_LOCK_CTL_RELEASE;   // double release -> 0
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_LOCK_CTL, &lc, sizeof(lc), sizeof(lc), &info);
+    CHECK(ok && lc.out.value == 0, "lock5 double release value=%u\n", lc.out.value);
+
+    // Cross-handle contention + blocking acquire wakeup + cancellation.
+    {
+        HANDLE h2 = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                OPEN_EXISTING, 0, NULL);
+        struct tenstorrent_lock_ctl lc2;
+        struct BlockingLockArg ba;
+        HANDLE thread;
+
+        // h2 holds lock 7.
+        memset(&lc2, 0, sizeof(lc2));
+        lc2.in.flags = TENSTORRENT_LOCK_CTL_ACQUIRE;
+        lc2.in.index = 7;
+        ok = TtIoctl(h2, IOCTL_TENSTORRENT_LOCK_CTL, &lc2, sizeof(lc2), sizeof(lc2), &info);
+        CHECK(ok && lc2.out.value == 1, "h2 lock7 acquire value=%u\n", lc2.out.value);
+
+        // h's non-blocking acquire loses.
+        memset(&lc, 0, sizeof(lc));
+        lc.in.flags = TENSTORRENT_LOCK_CTL_ACQUIRE;
+        lc.in.index = 7;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_LOCK_CTL, &lc, sizeof(lc), sizeof(lc), &info);
+        CHECK(ok && lc.out.value == 0, "h lock7 contended value=%u\n", lc.out.value);
+
+        // h's BLOCKING acquire pends in the driver; it must not return yet.
+        ba.h = h; ba.index = 7; ba.completed = 0; ba.value = 0; ba.gle = 0;
+        thread = CreateThread(NULL, 0, BlockingLockThread, &ba, 0, NULL);
+        CHECK(thread != NULL, "CreateThread failed\n");
+        Sleep(500);
+        CHECK(ba.completed == 0, "blocking acquire returned early (still held)\n");
+
+        // h2 releases -> the pended waiter wakes and acquires (value 1).
+        lc2.in.flags = TENSTORRENT_LOCK_CTL_RELEASE;
+        lc2.in.index = 7;
+        ok = TtIoctl(h2, IOCTL_TENSTORRENT_LOCK_CTL, &lc2, sizeof(lc2), sizeof(lc2), &info);
+        CHECK(ok && lc2.out.value == 1, "h2 lock7 release value=%u\n", lc2.out.value);
+        WaitForSingleObject(thread, 5000);
+        CHECK(ba.completed == 1 && ba.value == 1,
+              "blocking acquire not woken: completed=%ld value=%u gle=%lu\n",
+              ba.completed, ba.value, ba.gle);
+        CloseHandle(thread);
+        printf("locks: blocking acquire woke on release (value=%u) PASS\n", ba.value);
+
+        // Cancellation: the blocking waiter (ba) that just won holds lock 7 on
+        // h. hc issues a blocking acquire on 7 (blocks on h's hold), then we
+        // cancel its in-flight synchronous ioctl -> STATUS_CANCELLED.
+        {
+            HANDLE hc = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                    OPEN_EXISTING, 0, NULL);
+            struct BlockingLockArg bc;
+
+            bc.h = hc; bc.index = 7; bc.completed = 0; bc.value = 0; bc.gle = 0;
+            thread = CreateThread(NULL, 0, BlockingLockThread, &bc, 0, NULL);
+            CHECK(thread != NULL, "cancel CreateThread failed\n");
+            Sleep(500);
+            CHECK(bc.completed == 0, "cancel-case acquire returned early\n");
+            CancelSynchronousIo(thread);   // cancel the pended blocking request
+            WaitForSingleObject(thread, 5000);
+            CHECK(bc.completed == 1 && bc.value != 1,
+                  "cancel did not unblock: completed=%ld value=%u gle=%lu\n",
+                  bc.completed, bc.value, bc.gle);
+            CloseHandle(thread);
+            CloseHandle(hc);
+            printf("locks: blocking acquire cancelled (gle=%lu) PASS\n", bc.gle);
+        }
+
+        // h releases lock 7 (won via the blocking acquire above).
+        lc.in.flags = TENSTORRENT_LOCK_CTL_RELEASE;
+        lc.in.index = 7;
+        TtIoctl(h, IOCTL_TENSTORRENT_LOCK_CTL, &lc, sizeof(lc), sizeof(lc), &info);
+        CloseHandle(h2);
+        printf("locks: acquire/test/release/contention PASS\n");
+    }
+
+    // --- Power aggregation: two handles OR flags, max settings -----------
+    {
+        HANDLE hb = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                OPEN_EXISTING, 0, NULL);
+        // h: power-aware, requests MAX_AI_CLK + setting[0]=100.
+        memset(&ps, 0, sizeof(ps));
+        ps.argsz = sizeof(ps);
+        ps.validity = (uint8_t)TT_POWER_VALIDITY(4, 1);
+        ps.power_flags = TT_POWER_FLAG_MAX_AI_CLK;
+        ps.power_settings[0] = 100;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_SET_POWER_STATE, &ps, sizeof(ps), sizeof(ps), &info);
+        CHECK(ok, "h SET_POWER_STATE gle=%lu\n", GetLastError());
+
+        // hb: requests TENSIX_ENABLE + setting[0]=250.
+        memset(&ps, 0, sizeof(ps));
+        ps.argsz = sizeof(ps);
+        ps.validity = (uint8_t)TT_POWER_VALIDITY(4, 1);
+        ps.power_flags = TT_POWER_FLAG_TENSIX_ENABLE;
+        ps.power_settings[0] = 250;
+        ok = TtIoctl(hb, IOCTL_TENSTORRENT_SET_POWER_STATE, &ps, sizeof(ps), sizeof(ps), &info);
+        CHECK(ok, "hb SET_POWER_STATE gle=%lu\n", GetLastError());
+
+        // Aggregate: flags OR'd (MAX_AI_CLK | TENSIX_ENABLE plus any legacy
+        // default contributors' bits), setting[0] = max(100,250) = 250.
+        memset(&agg, 0, sizeof(agg));
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_GET_AGG_POWER, &agg, sizeof(agg), sizeof(agg), &info);
+        CHECK(ok && agg.valid, "agg power gle=%lu valid=%u\n", GetLastError(), agg.valid);
+        CHECK((agg.power_flags & TT_POWER_FLAG_MAX_AI_CLK) &&
+              (agg.power_flags & TT_POWER_FLAG_TENSIX_ENABLE),
+              "agg flags=%#x (missing OR)\n", agg.power_flags);
+        CHECK(agg.power_settings[0] == 250,
+              "agg setting[0]=%u (want max 250)\n", agg.power_settings[0]);
+        printf("power: aggregated flags=%#x setting[0]=%u (OR + max) PASS\n",
+               agg.power_flags, agg.power_settings[0]);
+        CloseHandle(hb);
+    }
+}
+
 // M4: reset flavors, fd-invalidation, reset-under-mapping. Needs a second
 // handle (the "worker") plus a fresh handle per reset (tt-umd/tools pattern).
 static void TestM4Reset(const WCHAR *path, int deviceId)
@@ -824,6 +1017,7 @@ int wmain(int argc, wchar_t **argv)
         TestNegative(h);
         TestM2Firmware(h, deviceId);
         TestM3Memory(h, deviceId);
+        TestM5(path, h, deviceId);
         CloseHandle(h);
 
         if (isRealDevice) {

@@ -36,4 +36,16 @@ struct tenstorrent_debug_arc_msg {
     uint32_t success;     // out
 };
 
+// Read back the driver's current aggregated power state (what SET_POWER_STATE
+// last computed and sent to firmware). Firmware does not echo it, so this is
+// how the multi-client aggregation is verified.
+#define IOCTL_TENSTORRENT_DEBUG_GET_AGG_POWER TT_CTL_DEBUG(2)
+
+struct tenstorrent_debug_agg_power {
+    uint32_t valid;             // out: 1 once any aggregation has run
+    uint16_t power_flags;       // out: aggregated (OR)
+    uint16_t reserved;
+    uint16_t power_settings[14];// out: aggregated (max)
+};
+
 #endif // TTKMD_DEBUG_H_INCLUDED

@@ -330,6 +330,34 @@ TtIoctlDebugArcMsg(
     WdfRequestSetInformation(Request, sizeof(arg));
     return STATUS_SUCCESS;
 }
+
+static NTSTATUS
+TtIoctlDebugGetAggPower(
+    _In_ PTT_DEVICE_CONTEXT Context,
+    _In_ WDFREQUEST Request
+    )
+{
+    struct tenstorrent_debug_agg_power out;
+    PVOID outBuf;
+    size_t outLen;
+    NTSTATUS status;
+
+    RtlZeroMemory(&out, sizeof(out));
+    WdfWaitLockAcquire(Context->PowerLock, NULL);
+    out.valid = Context->PowerAggValid ? 1 : 0;
+    out.power_flags = Context->PowerAggFlags;
+    RtlCopyMemory(out.power_settings, Context->PowerAggSettings,
+                  sizeof(out.power_settings));
+    WdfWaitLockRelease(Context->PowerLock);
+
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(out), &outBuf, &outLen);
+    if (!NT_SUCCESS(status) || outLen < sizeof(out)) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    RtlCopyMemory(outBuf, &out, sizeof(out));
+    WdfRequestSetInformation(Request, sizeof(out));
+    return STATUS_SUCCESS;
+}
 #endif // TT_DEBUG_INTERFACES
 
 _Use_decl_annotations_
@@ -367,6 +395,11 @@ TtEvtIoDeviceControl(
         goto release;
     }
 
+    if (IoControlCode == IOCTL_TENSTORRENT_QUERY_TELEMETRY) {
+        status = TtIoctlQueryTelemetry(context, Request);
+        goto release;
+    }
+
 #ifdef TT_DEBUG_INTERFACES
     if (IoControlCode == IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY) {
         status = TtIoctlDebugReadTelemetry(context, Request);
@@ -374,6 +407,10 @@ TtEvtIoDeviceControl(
     }
     if (IoControlCode == IOCTL_TENSTORRENT_DEBUG_ARC_MSG) {
         status = TtIoctlDebugArcMsg(context, Request);
+        goto release;
+    }
+    if (IoControlCode == IOCTL_TENSTORRENT_DEBUG_GET_AGG_POWER) {
+        status = TtIoctlDebugGetAggPower(context, Request);
         goto release;
     }
 #endif
@@ -393,6 +430,21 @@ TtEvtIoDeviceControl(
         break;
     case 6:
         status = TtIoctlResetDevice(context, fileObject, Request);
+        break;
+    case 8: {
+        BOOLEAN pended = FALSE;
+
+        status = TtIoctlLockCtl(context, fileObject, Request, &pended);
+        if (pended) {
+            // Request now owned by the lock wait queue; release the reset lock
+            // and return without completing it (a waker completes it later).
+            TtResetRelease(context);
+            return;
+        }
+        break;
+    }
+    case 15:
+        status = TtIoctlSetPowerState(context, fileObject, Request);
         break;
     case 11:
         status = TtIoctlAllocateTlb(context, fileObject, Request);

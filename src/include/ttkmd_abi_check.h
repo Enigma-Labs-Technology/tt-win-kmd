@@ -109,6 +109,23 @@ TT_ABI_SIZE(tenstorrent_reset_device_out, 8);
 TT_ABI_FIELD(tenstorrent_reset_device_out, result, 4, 4);
 TT_ABI_SIZE(tenstorrent_reset_device, 16);
 
+// LOCK_CTL (nr 8)
+TT_ABI_SIZE(tenstorrent_lock_ctl_in, 12);
+TT_ABI_FIELD(tenstorrent_lock_ctl_in, flags, 4, 4);
+TT_ABI_FIELD(tenstorrent_lock_ctl_in, index, 8, 1);
+TT_ABI_SIZE(tenstorrent_lock_ctl_out, 4);
+TT_ABI_FIELD(tenstorrent_lock_ctl_out, value, 0, 1);
+TT_ABI_SIZE(tenstorrent_lock_ctl, 16);
+
+// SET_POWER_STATE (nr 15)
+TT_ABI_SIZE(tenstorrent_power_state, 40);
+TT_ABI_FIELD(tenstorrent_power_state, argsz, 0, 4);
+TT_ABI_FIELD(tenstorrent_power_state, flags, 4, 4);
+TT_ABI_FIELD(tenstorrent_power_state, reserved0, 8, 1);
+TT_ABI_FIELD(tenstorrent_power_state, validity, 9, 1);
+TT_ABI_FIELD(tenstorrent_power_state, power_flags, 10, 2);
+TT_ABI_FIELD(tenstorrent_power_state, power_settings, 12, 28);
+
 // CTL_CODE values fixed by DD-4; a change here is an ABI break for user mode.
 static_assert(IOCTL_TENSTORRENT_GET_DEVICE_INFO == 0x80FA2000, "CTL code drift");
 static_assert(IOCTL_TENSTORRENT_QUERY_MAPPINGS == 0x80FA2008, "CTL code drift");

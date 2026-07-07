@@ -132,6 +132,20 @@ typedef struct _TT_DEVICE_CONTEXT {
 
     // M3: DMA enabler for coherent (common) buffers.
     WDFDMAENABLER DmaEnabler;
+
+    // M5: resource locks (tt_dev->resource_lock parity, device.h:50). 64-bit
+    // "held" bitmap + a manual queue of pended ACQUIRE_BLOCKING requests, both
+    // guarded by LockLock.
+    WDFWAITLOCK LockLock;
+    UINT64 ResourceLockHeld;
+    WDFQUEUE LockWaitQueue;
+
+    // M5: aggregated power state (last value sent to firmware), guarded by
+    // PowerLock which also serializes aggregation over the FileList.
+    WDFWAITLOCK PowerLock;
+    BOOLEAN PowerAggValid;
+    UINT16 PowerAggFlags;
+    UINT16 PowerAggSettings[14];
 } TT_DEVICE_CONTEXT, *PTT_DEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_DEVICE_CONTEXT, TtGetDeviceContext)
@@ -179,6 +193,14 @@ typedef struct _TT_FILE_CONTEXT {
     LIST_ENTRY DeviceLink;   // membership in TT_DEVICE_CONTEXT.FileList
     WDFFILEOBJECT FileObject;
     BOOLEAN OnDeviceList;
+
+    // M5: resource locks this handle holds (priv->resource_lock parity) and
+    // this handle's power-state contribution.
+    UINT64 LocksHeld;
+    BOOLEAN PowerContributes;   // FALSE until first SET_POWER_STATE / legacy default
+    UINT8 PowerValidity;
+    UINT16 PowerFlags;
+    UINT16 PowerSettings[14];
 } TT_FILE_CONTEXT, *PTT_FILE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_FILE_CONTEXT, TtGetFileContext)
@@ -246,3 +268,20 @@ VOID TtCfgWriteDword(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _In_ UL
 VOID TtResetAcquireShared(_In_ PTT_DEVICE_CONTEXT Context);
 VOID TtResetAcquireExclusive(_In_ PTT_DEVICE_CONTEXT Context);
 VOID TtResetRelease(_In_ PTT_DEVICE_CONTEXT Context);
+
+// locks.c (LOCK_CTL, tt-kmd chardev.c:323-430)
+NTSTATUS TtIoctlLockCtl(_In_ PTT_DEVICE_CONTEXT Context,
+                        _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request,
+                        _Out_ BOOLEAN *Pended);
+VOID TtLocksWakeWaiters(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtLocksReleaseAll(_In_ PTT_DEVICE_CONTEXT Context, _In_ WDFFILEOBJECT FileObject);
+NTSTATUS TtLocksInit(_In_ PTT_DEVICE_CONTEXT Context);
+
+// power.c (SET_POWER_STATE aggregation, tt-kmd chardev.c:478-589)
+NTSTATUS TtIoctlSetPowerState(_In_ PTT_DEVICE_CONTEXT Context,
+                              _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+VOID TtPowerFileDefault(_In_ WDFFILEOBJECT FileObject);
+VOID TtPowerAggregate(_In_ PTT_DEVICE_CONTEXT Context);
+
+// telemetry query (memory-free; blackhole.c telemetry tags)
+NTSTATUS TtIoctlQueryTelemetry(_In_ PTT_DEVICE_CONTEXT Context, _In_ WDFREQUEST Request);

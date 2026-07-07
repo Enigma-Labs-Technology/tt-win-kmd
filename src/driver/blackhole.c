@@ -7,6 +7,8 @@
 // WPTR publish → doorbell, per the porting note, so the sequence stays correct
 // on weaker-ordered targets too.
 #include "ttkmd.h"
+
+#include <stddef.h>
 #include "ttkmd_ioctl.h"
 #include "blackhole.h"
 
@@ -628,5 +630,113 @@ TtBhReadTelemetryTag(
     if (!TtBhCsmRead32(Context, addr, Value)) {
         return STATUS_ACCESS_VIOLATION;    // csm range error (-EINVAL)
     }
+    return STATUS_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry query (hwmon-equivalent, DD-10). Scales firmware tags to the exact
+// Linux hwmon ABI units so tooling ports mechanically (analysis §10).
+// ---------------------------------------------------------------------------
+
+// Reads a tag; on success sets the present bit and returns the raw value.
+static BOOLEAN
+TtBhTagPresent(
+    _In_ struct _TT_DEVICE_CONTEXT *Context,
+    _In_ UINT16 Tag,
+    _Out_ UINT32 *Value
+    )
+{
+    return NT_SUCCESS(TtBhReadTelemetryTag(Context, Tag, Value));
+}
+
+_Use_decl_annotations_
+NTSTATUS
+TtIoctlQueryTelemetry(
+    struct _TT_DEVICE_CONTEXT *Context,
+    WDFREQUEST Request
+    )
+{
+    struct tenstorrent_query_telemetry_out out;
+    PVOID buffer;
+    size_t length;
+    UINT32 raw, lo, hi;
+    NTSTATUS status;
+
+    if (!Context->IsBlackhole || !Context->TelemetryValid) {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    RtlZeroMemory(&out, sizeof(out));
+
+    // temp1_input (tag 11): 16.16 fixed-point degC -> milli-degC.
+    if (TtBhTagPresent(Context, 11, &raw)) {
+        out.temp_input_mc = (INT32)(((INT64)raw * 1000) >> 16);
+        out.present |= TT_TELEM_PRESENT_TEMP;
+        if (TtBhTagPresent(Context, 56, &raw)) {   // temp1_max: degC -> m degC
+            out.temp_max_mc = (INT32)(raw * 1000);
+        }
+    }
+    // in0_input (tag 6): mV as-is; in0_max = tag 9 upper 16 bits.
+    if (TtBhTagPresent(Context, 6, &raw)) {
+        out.vcore_input_mv = raw;
+        out.present |= TT_TELEM_PRESENT_VCORE;
+        if (TtBhTagPresent(Context, 9, &raw)) {
+            out.vcore_max_mv = (raw >> 16) & 0xFFFF;
+        }
+    }
+    // curr1_input (tag 8): A -> mA; curr1_max tag 55.
+    if (TtBhTagPresent(Context, 8, &raw)) {
+        out.curr_input_ma = raw * 1000;
+        out.present |= TT_TELEM_PRESENT_CURRENT;
+        if (TtBhTagPresent(Context, 55, &raw)) {
+            out.curr_max_ma = raw * 1000;
+        }
+    }
+    // power1_input (tag 7): W -> uW; power1_max tag 64.
+    if (TtBhTagPresent(Context, 7, &raw)) {
+        out.power_input_uw = raw * 1000000u;
+        out.present |= TT_TELEM_PRESENT_POWER;
+        if (TtBhTagPresent(Context, 64, &raw)) {
+            out.power_max_uw = raw * 1000000u;
+        }
+    }
+    if (TtBhTagPresent(Context, 41, &out.fan_rpm)) {
+        out.present |= TT_TELEM_PRESENT_FAN;
+    }
+    if (TtBhTagPresent(Context, 14, &out.aiclk_mhz)) {
+        out.present |= TT_TELEM_PRESENT_AICLK;
+    }
+    if (TtBhTagPresent(Context, 15, &out.axiclk_mhz)) {
+        out.present |= TT_TELEM_PRESENT_AXICLK;
+    }
+    if (TtBhTagPresent(Context, 16, &out.arcclk_mhz)) {
+        out.present |= TT_TELEM_PRESENT_ARCCLK;
+    }
+    if (TtBhTagPresent(Context, 32, &out.heartbeat)) {
+        out.present |= TT_TELEM_PRESENT_HEARTBEAT;
+    }
+    if (TtBhTagPresent(Context, 60, &out.therm_trip_count)) {
+        out.present |= TT_TELEM_PRESENT_THERMTRIP;
+    }
+    if (TtBhTagPresent(Context, 28, &out.fw_bundle_ver)) {
+        out.present |= TT_TELEM_PRESENT_FW_BUNDLE;
+    }
+    // tt_asic_id: u64 = tag 61 (high) : tag 62 (low).
+    if (TtBhTagPresent(Context, 61, &hi) && TtBhTagPresent(Context, 62, &lo)) {
+        out.asic_id = ((UINT64)hi << 32) | lo;
+        out.present |= TT_TELEM_PRESENT_ASIC_ID;
+    }
+    // tt_serial / board id: u64 = tag 1 (high) : tag 2 (low).
+    if (TtBhTagPresent(Context, 1, &hi) && TtBhTagPresent(Context, 2, &lo)) {
+        out.serial = ((UINT64)hi << 32) | lo;
+        out.present |= TT_TELEM_PRESENT_SERIAL;
+    }
+
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(out), &buffer, &length);
+    if (!NT_SUCCESS(status) || length < sizeof(out)) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    RtlCopyMemory(buffer, &out, sizeof(out));
+    WdfRequestSetInformation(Request, sizeof(out));
     return STATUS_SUCCESS;
 }

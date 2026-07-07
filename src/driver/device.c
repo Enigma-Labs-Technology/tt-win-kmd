@@ -105,6 +105,14 @@ TtEvtDeviceAdd(
     if (!NT_SUCCESS(status)) {
         return status;
     }
+    status = WdfWaitLockCreate(&attributes, &context->PowerLock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    status = TtLocksInit(context);   // M5 lock bitmap + wait queue
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
 
     // Replaces /dev/tenstorrent/N: interface instance per device with the
     // ordinal as reference string (DD-2).
@@ -162,12 +170,20 @@ TtEvtDeviceFileCreate(
 
     if (NT_SUCCESS(status)) {
         // Join the device-global file list so a reset can reach this handle's
-        // mappings (VMA-zap parity, DD-9).
+        // mappings (VMA-zap parity, DD-9) and power aggregation can see it.
         fileContext->FileObject = FileObject;
+
+        // Legacy power default (chardev.c:821-823): contribute all flags on
+        // except MAX_AI_CLK. A power-aware client opts out via SET_POWER_STATE.
+        TtPowerFileDefault(FileObject);
+
         WdfWaitLockAcquire(context->FileListLock, NULL);
         InsertTailList(&context->FileList, &fileContext->DeviceLink);
         fileContext->OnDeviceList = TRUE;
         WdfWaitLockRelease(context->FileListLock);
+
+        // Aggregate now that this handle contributes (chardev.c:852-856).
+        TtPowerAggregate(context);
     }
 
     TraceLoggingWrite(g_TtTraceProvider, "FileCreate",
@@ -189,6 +205,10 @@ TtEvtFileCleanup(
     // (release takes reset_rwsem shared, chardev.c:929).
     TtResetAcquireShared(context);
 
+    // Release all resource locks this handle held; wakes blocking waiters
+    // (chardev.c:877-885). Before delisting so waiter gen checks are correct.
+    TtLocksReleaseAll(context, FileObject);
+
     if (fileContext->OnDeviceList) {
         WdfWaitLockAcquire(context->FileListLock, NULL);
         RemoveEntryList(&fileContext->DeviceLink);
@@ -199,6 +219,12 @@ TtEvtFileCleanup(
     TtMemoryFileCleanup(context, FileObject);
 
     TtResetRelease(context);
+
+    // Re-aggregate power now this handle no longer contributes (chardev.c:938).
+    if (fileContext->PowerContributes) {
+        fileContext->PowerContributes = FALSE;
+        TtPowerAggregate(context);
+    }
 }
 
 // PCI segment (GET_DEVICE_INFO pci_domain parity). Multi-segment systems are
@@ -536,6 +562,12 @@ TtEvtDeviceSurpriseRemoval(
     context->Detached = TRUE;
     TtResetZapMappings(context);
     TtResetRelease(context);
+
+    // Wake blocking lock waiters so they observe detached and fail -ENODEV
+    // (enumerate.c:461-463 parity).
+    WdfWaitLockAcquire(context->LockLock, NULL);
+    TtLocksWakeWaiters(context);
+    WdfWaitLockRelease(context->LockLock);
 
     TraceLoggingWrite(g_TtTraceProvider, "SurpriseRemoval");
 }
