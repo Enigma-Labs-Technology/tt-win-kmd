@@ -32,8 +32,8 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,file=OVMF_VARS.fd \
     -drive file="$DISK",if=none,id=d0,format=qcow2,cache=none,discard=unmap \
     -device nvme,drive=d0,serial=ttkmd-disk \
-    -drive file="$WIN_ISO",media=cdrom,if=none,id=cd0 -device ide-cd,drive=cd0 \
-    -drive file=unattend.iso,media=cdrom,if=none,id=cd1 -device ide-cd,drive=cd1 \
+    -drive file="$WIN_ISO",media=cdrom,if=none,id=cd0 -device ide-cd,drive=cd0,bus=ide.0 \
+    -drive file=unattend.iso,media=cdrom,if=none,id=cd1 -device ide-cd,drive=cd1,bus=ide.1 \
     -netdev user,id=n0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22 -device e1000e,netdev=n0 \
     -display none -vnc 127.0.0.1:7 \
     -qmp unix:qmp.sock,server,nowait \
