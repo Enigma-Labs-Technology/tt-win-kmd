@@ -19,6 +19,20 @@
 #include "ttkmd_debug.h"
 
 static int g_failures;
+static BOOL g_simOracle;   // --sim-oracle: keep ttsim exact-equality CHECKs
+
+// --only selectors (bitmask). See Usage() for the CLI grammar.
+#define SEL_INFO      (1u << 0)   // driver + device info
+#define SEL_MAPPINGS  (1u << 1)   // QUERY_MAPPINGS
+#define SEL_NEGATIVE  (1u << 2)   // negative / parity cases
+#define SEL_FIRMWARE  (1u << 3)   // TestM2Firmware (ARC TEST path)
+#define SEL_TELEMETRY (1u << 4)   // read-only telemetry dump
+#define SEL_TLB       (1u << 5)   // TLB alloc/configure/map/read
+#define SEL_DMA       (1u << 6)   // DMA-buffer alloc/map/rw
+#define SEL_PIN       (1u << 7)   // PIN_PAGES
+
+// Read-only-safe default set (bare `ttinfo.exe`): no resets, no TLB/DMA/pin.
+#define SEL_DEFAULT (SEL_INFO | SEL_MAPPINGS | SEL_NEGATIVE | SEL_TELEMETRY)
 
 #define CHECK(cond, ...) do { \
     if (!(cond)) { \
@@ -33,6 +47,38 @@ static BOOL TtIoctl(HANDLE h, DWORD code, void *buf, DWORD inLen, DWORD outLen,
 {
     *info = 0;
     return DeviceIoControl(h, code, buf, inLen, buf, outLen, info, NULL);
+}
+
+// Production liveness probe: read the firmware heartbeat via the RELEASE-safe
+// IOCTL_TENSTORRENT_QUERY_TELEMETRY (never the debug DEBUG_READ_TELEMETRY, which
+// is compiled out of release drivers), wait, read again. Wrap-tolerant: any u32
+// change means the chip is running. Requires TT_TELEM_PRESENT_HEARTBEAT in both
+// reads. waitMs==0 uses the 1500 ms default.
+static BOOL HeartbeatAdvances(HANDLE dev, DWORD waitMs)
+{
+    struct tenstorrent_query_telemetry qt;
+    DWORD info;
+    uint32_t hb1, hb2;
+
+    memset(&qt, 0, sizeof(qt));
+    if (!TtIoctl(dev, IOCTL_TENSTORRENT_QUERY_TELEMETRY, &qt, sizeof(qt),
+                 sizeof(qt), &info) ||
+        !(qt.out.present & TT_TELEM_PRESENT_HEARTBEAT)) {
+        return FALSE;
+    }
+    hb1 = qt.out.heartbeat;
+
+    Sleep(waitMs ? waitMs : 1500);
+
+    memset(&qt, 0, sizeof(qt));
+    if (!TtIoctl(dev, IOCTL_TENSTORRENT_QUERY_TELEMETRY, &qt, sizeof(qt),
+                 sizeof(qt), &info) ||
+        !(qt.out.present & TT_TELEM_PRESENT_HEARTBEAT)) {
+        return FALSE;
+    }
+    hb2 = qt.out.heartbeat;
+
+    return hb2 != hb1;   // wrap-tolerant: treat any change as alive
 }
 
 static void TestDriverInfo(HANDLE h)
@@ -204,7 +250,18 @@ static void TestM2Firmware(HANDLE h, int deviceId)
     ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
                  sizeof(t), &info);
     CHECK(ok, "telemetry tag1 failed, gle=%lu\n", GetLastError());
-    CHECK(t.value == 0x400, "board_id_high=%#x\n", t.value);
+    if (g_simOracle) {
+        CHECK(t.value == 0x400, "board_id_high=%#x\n", t.value);
+    } else {
+        // Silicon: decode card_type; nonzero passes. 0x40 == p150a (WARN only).
+        uint32_t cardType = (t.value >> 4) & 0xFFFF;
+        CHECK(cardType != 0, "board_id_high=%#x card_type=0\n", t.value);
+        printf("board: id_high=%#x card_type=%#x%s\n", t.value, cardType,
+               cardType == 0x40 ? " (p150a)" : "");
+        if (cardType != 0x40) {
+            printf("WARN: card_type %#x != 0x40 (p150a expected)\n", cardType);
+        }
+    }
 
     // AICLK (tag 14): ttsim reports 1000 MHz.
     memset(&t, 0, sizeof(t));
@@ -212,17 +269,28 @@ static void TestM2Firmware(HANDLE h, int deviceId)
     ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
                  sizeof(t), &info);
     CHECK(ok, "telemetry tag14 failed, gle=%lu\n", GetLastError());
-    CHECK(t.value == 1000, "aiclk=%u\n", t.value);
+    if (g_simOracle) {
+        CHECK(t.value == 1000, "aiclk=%u\n", t.value);
+    } else {
+        CHECK(t.value >= 100 && t.value <= 2000, "aiclk=%u (want 100..2000)\n",
+              t.value);
+        printf("aiclk: %u MHz\n", t.value);
+    }
 
     // Absent tag -> STATUS_NOT_FOUND (-ENODATA parity); ttsim has no tag 5.
     memset(&t, 0, sizeof(t));
     t.tag_id = 5;
     ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
                  sizeof(t), &info);
-    CHECK(!ok && GetLastError() == ERROR_NOT_FOUND,
-          "absent tag: ok=%d gle=%lu\n", ok, GetLastError());
+    if (g_simOracle) {
+        CHECK(!ok && GetLastError() == ERROR_NOT_FOUND,
+              "absent tag: ok=%d gle=%lu\n", ok, GetLastError());
+    } else {
+        // Silicon: tag 5 presence is board-dependent; report, do not assert.
+        printf("tag5: %s\n", ok ? "present" : "absent");
+    }
 
-    // Out-of-range tag -> -EINVAL parity.
+    // Out-of-range tag -> -EINVAL parity (structural; always asserted).
     memset(&t, 0, sizeof(t));
     t.tag_id = 128;
     ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
@@ -262,23 +330,21 @@ static void TestM2Firmware(HANDLE h, int deviceId)
     printf("arc: TEST round-trip ok (response header=0)\n");
 }
 
-// M3: TLB windows, MAP/UNMAP, DMA buffers, pin pages (vs ttsim Blackhole).
-static void TestM3Memory(HANDLE h, int deviceId)
+// M3 (tlb): TLB windows + MAP/UNMAP (vs ttsim Blackhole). Factored out of the
+// original TestM3Memory so `--only tlb` runs just this rung; code is byte-
+// equivalent apart from the CSM-liveness reads, which are silicon-gated (#3/#5).
+static void TestM3Tlb(HANDLE h, int deviceId)
 {
     struct tenstorrent_allocate_tlb at;
     struct tenstorrent_configure_tlb ct;
     struct tenstorrent_free_tlb ft;
-    struct tenstorrent_allocate_dma_buf ab;
     struct tenstorrent_map mp;
     struct tenstorrent_unmap um;
-    struct tenstorrent_pin_pages pp;
-    struct tenstorrent_unpin_pages up;
     DWORD info;
     BOOL ok;
     uint32_t tlbId;
     uint64_t tlbUcToken;
     volatile uint32_t *va;
-    void *pinBuf;
 
     if (deviceId != 0xB140) {
         return;   // needs the Blackhole TLB/DMA hardware model
@@ -331,10 +397,19 @@ static void TestM3Memory(HANDLE h, int deviceId)
     CHECK(ok, "MAP tlb failed, gle=%lu\n", GetLastError());
     va = (volatile uint32_t *)(uintptr_t)mp.out.user_va;
     CHECK(va != NULL, "MAP returned null va\n");
-    // CSM+0x100 = ttsim telemetry table: word0 = version 1
-    CHECK(va[0x100 / 4] == 1, "csm telemetry version via user map = %u\n",
-          va[0x100 / 4]);
-    printf("tlb window: user VA reads CSM (telemetry version %u)\n", va[0x100 / 4]);
+    if (g_simOracle) {
+        // CSM+0x100 = ttsim telemetry table: word0 = version 1
+        CHECK(va[0x100 / 4] == 1, "csm telemetry version via user map = %u\n",
+              va[0x100 / 4]);
+        printf("tlb window: user VA reads CSM (telemetry version %u)\n", va[0x100 / 4]);
+    } else {
+        // Silicon: no CSM dereference before liveness is proven — the window
+        // targets a management-core NOC endpoint; prove liveness via the
+        // production telemetry path instead.
+        printf("tlb window: user VA mapped (CSM contents not read on silicon)\n");
+        CHECK(HeartbeatAdvances(h, 1500),
+              "tlb window: heartbeat health check failed\n");
+    }
 
     // FREE while mapped -> EBUSY; UNMAP; FREE ok
     memset(&ft, 0, sizeof(ft));
@@ -372,13 +447,34 @@ static void TestM3Memory(HANDLE h, int deviceId)
     ok = TtIoctl(h, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
     CHECK(ok, "MAP bar0 failed, gle=%lu\n", GetLastError());
     va = (volatile uint32_t *)(uintptr_t)mp.out.user_va;
-    CHECK(va[0x100 / 4] == 1, "bar0-path csm version=%u\n", va[0x100 / 4]);
+    if (g_simOracle) {
+        CHECK(va[0x100 / 4] == 1, "bar0-path csm version=%u\n", va[0x100 / 4]);
+    } else {
+        printf("tlb bar0-path: mapped (CSM contents not read on silicon)\n");
+        CHECK(HeartbeatAdvances(h, 1500),
+              "tlb bar0-path: heartbeat health check failed\n");
+    }
     memset(&um, 0, sizeof(um));
     um.in.user_va = mp.out.user_va;
     (void)TtIoctl(h, IOCTL_TENSTORRENT_UNMAP, &um, sizeof(um), sizeof(um), &info);
     memset(&ft, 0, sizeof(ft));
     ft.in.id = at.out.id;
     (void)TtIoctl(h, IOCTL_TENSTORRENT_FREE_TLB, &ft, sizeof(ft), sizeof(ft), &info);
+}
+
+// M3 (dma): DMA-buffer validation/alloc/map/verify + NOC_DMA. Factored from the
+// original TestM3Memory (byte-equivalent) so `--only dma` runs just this rung.
+static void TestM3Dma(HANDLE h, int deviceId)
+{
+    struct tenstorrent_allocate_dma_buf ab;
+    struct tenstorrent_map mp;
+    DWORD info;
+    BOOL ok;
+    volatile uint32_t *va;
+
+    if (deviceId != 0xB140) {
+        return;   // needs the Blackhole TLB/DMA hardware model
+    }
 
     // --- DMA buffer: validation, alloc, map, write/read, NOC_DMA ----------
     memset(&ab, 0, sizeof(ab));
@@ -433,6 +529,21 @@ static void TestM3Memory(HANDLE h, int deviceId)
         ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF, &zero, 0, 0, &info);
         CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
               "FREE_DMA_BUF: ok=%d gle=%lu\n", ok, GetLastError());
+    }
+}
+
+// M3 (pin): PIN_PAGES positive + negatives. Factored from the original
+// TestM3Memory (byte-equivalent) so `--only pin` runs just this rung.
+static void TestM3Pin(HANDLE h, int deviceId)
+{
+    struct tenstorrent_pin_pages pp;
+    struct tenstorrent_unpin_pages up;
+    void *pinBuf;
+    DWORD info;
+    BOOL ok;
+
+    if (deviceId != 0xB140) {
+        return;   // needs the Blackhole TLB/DMA hardware model
     }
 
     // --- PIN_PAGES: single page positive + negatives ----------------------
@@ -530,15 +641,31 @@ static void TestM5(const WCHAR *path, HANDLE h, int deviceId)
     ok = TtIoctl(h, IOCTL_TENSTORRENT_QUERY_TELEMETRY, &qt, sizeof(qt), sizeof(qt), &info);
     CHECK(ok, "QUERY_TELEMETRY gle=%lu\n", GetLastError());
     CHECK(qt.out.present & TT_TELEM_PRESENT_AICLK, "aiclk not present\n");
-    CHECK(qt.out.aiclk_mhz == 1000, "aiclk=%u (want 1000)\n", qt.out.aiclk_mhz);
+    if (g_simOracle) {
+        CHECK(qt.out.aiclk_mhz == 1000, "aiclk=%u (want 1000)\n", qt.out.aiclk_mhz);
+    } else {
+        CHECK(qt.out.aiclk_mhz >= 100 && qt.out.aiclk_mhz <= 2000,
+              "aiclk=%u (want 100..2000)\n", qt.out.aiclk_mhz);
+    }
     CHECK(qt.out.present & TT_TELEM_PRESENT_SERIAL, "serial not present\n");
-    // ttsim board id: high=0x400 (P150), low=0x1.
-    CHECK(qt.out.serial == ((uint64_t)0x400 << 32 | 0x1),
-          "serial=%llx\n", (unsigned long long)qt.out.serial);
+    if (g_simOracle) {
+        // ttsim board id: high=0x400 (P150), low=0x1.
+        CHECK(qt.out.serial == ((uint64_t)0x400 << 32 | 0x1),
+              "serial=%llx\n", (unsigned long long)qt.out.serial);
+    } else {
+        CHECK(qt.out.serial != 0, "serial=0\n");
+    }
     CHECK(qt.out.present & TT_TELEM_PRESENT_HEARTBEAT, "heartbeat not present\n");
     printf("telemetry: aiclk=%uMHz serial=%llx heartbeat=%u fw_bundle=%#x\n",
            qt.out.aiclk_mhz, (unsigned long long)qt.out.serial,
            qt.out.heartbeat, qt.out.fw_bundle_ver);
+    if (!g_simOracle) {
+        // Decode fw_bundle bytes 3..0 as maj.min.patch.ver; asic_id nonzero.
+        printf("telemetry: fw_bundle %u.%u.%u.%u asic_id=%#llx\n",
+               (qt.out.fw_bundle_ver >> 24) & 0xFF, (qt.out.fw_bundle_ver >> 16) & 0xFF,
+               (qt.out.fw_bundle_ver >> 8) & 0xFF, qt.out.fw_bundle_ver & 0xFF,
+               (unsigned long long)qt.out.asic_id);
+    }
 
     // --- LOCK_CTL: acquire / test / release / re-acquire -----------------
     memset(&lc, 0, sizeof(lc));
@@ -711,6 +838,78 @@ static void TestM5(const WCHAR *path, HANDLE h, int deviceId)
     }
 }
 
+// Read-only telemetry dump: issue the production QUERY_TELEMETRY and print every
+// field with its present bit (`name=value (present)` / `name=--- (absent)`). No
+// value assertions beyond present-mask nonzero + heartbeat liveness (#4/#5).
+static void TestTelemetryDump(HANDLE h, int deviceId)
+{
+    struct tenstorrent_query_telemetry qt;
+    DWORD info;
+    BOOL ok;
+
+    if (deviceId != 0xB140) {
+        printf("telemetry: skipped (no Blackhole telemetry on device %04x)\n",
+               deviceId);
+        return;
+    }
+
+    memset(&qt, 0, sizeof(qt));
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_QUERY_TELEMETRY, &qt, sizeof(qt), sizeof(qt), &info);
+    CHECK(ok, "QUERY_TELEMETRY gle=%lu\n", GetLastError());
+    if (!ok) {
+        return;
+    }
+    CHECK(qt.out.present != 0, "telemetry present-mask=0\n");
+
+    // One line per field; type-specific formatting, gated on the present bit.
+#define TELEM_I(field, bit) \
+    do { if (qt.out.present & (bit)) \
+             printf("  %-16s = %d (present)\n", #field, (int)qt.out.field); \
+         else printf("  %-16s = --- (absent)\n", #field); } while (0)
+#define TELEM_U(field, bit) \
+    do { if (qt.out.present & (bit)) \
+             printf("  %-16s = %u (present)\n", #field, (unsigned)qt.out.field); \
+         else printf("  %-16s = --- (absent)\n", #field); } while (0)
+#define TELEM_X64(field, bit) \
+    do { if (qt.out.present & (bit)) \
+             printf("  %-16s = %#llx (present)\n", #field, \
+                    (unsigned long long)qt.out.field); \
+         else printf("  %-16s = --- (absent)\n", #field); } while (0)
+
+    printf("telemetry dump (present-mask=%#x):\n", qt.out.present);
+    TELEM_I(temp_input_mc,    TT_TELEM_PRESENT_TEMP);
+    TELEM_I(temp_max_mc,      TT_TELEM_PRESENT_TEMP);
+    TELEM_U(vcore_input_mv,   TT_TELEM_PRESENT_VCORE);
+    TELEM_U(vcore_max_mv,     TT_TELEM_PRESENT_VCORE);
+    TELEM_U(curr_input_ma,    TT_TELEM_PRESENT_CURRENT);
+    TELEM_U(curr_max_ma,      TT_TELEM_PRESENT_CURRENT);
+    TELEM_U(power_input_uw,   TT_TELEM_PRESENT_POWER);
+    TELEM_U(power_max_uw,     TT_TELEM_PRESENT_POWER);
+    TELEM_U(aiclk_mhz,        TT_TELEM_PRESENT_AICLK);
+    TELEM_U(axiclk_mhz,       TT_TELEM_PRESENT_AXICLK);
+    TELEM_U(arcclk_mhz,       TT_TELEM_PRESENT_ARCCLK);
+    TELEM_U(fan_rpm,          TT_TELEM_PRESENT_FAN);
+    TELEM_U(heartbeat,        TT_TELEM_PRESENT_HEARTBEAT);
+    TELEM_U(therm_trip_count, TT_TELEM_PRESENT_THERMTRIP);
+    TELEM_X64(serial,         TT_TELEM_PRESENT_SERIAL);
+    TELEM_X64(asic_id,        TT_TELEM_PRESENT_ASIC_ID);
+    if (qt.out.present & TT_TELEM_PRESENT_FW_BUNDLE) {
+        printf("  %-16s = %#x -> %u.%u.%u.%u (present)\n", "fw_bundle_ver",
+               qt.out.fw_bundle_ver,
+               (qt.out.fw_bundle_ver >> 24) & 0xFF, (qt.out.fw_bundle_ver >> 16) & 0xFF,
+               (qt.out.fw_bundle_ver >> 8) & 0xFF, qt.out.fw_bundle_ver & 0xFF);
+    } else {
+        printf("  %-16s = --- (absent)\n", "fw_bundle_ver");
+    }
+
+#undef TELEM_I
+#undef TELEM_U
+#undef TELEM_X64
+
+    // The only assertion beyond present-mask nonzero: the chip is alive.
+    CHECK(HeartbeatAdvances(h, 1500), "telemetry: heartbeat did not advance\n");
+}
+
 // M4: reset flavors, fd-invalidation, reset-under-mapping. Needs a second
 // handle (the "worker") plus a fresh handle per reset (tt-umd/tools pattern).
 static void TestM4Reset(const WCHAR *path, int deviceId)
@@ -752,7 +951,12 @@ static void TestM4Reset(const WCHAR *path, int deviceId)
     ok = TtIoctl(worker, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
     CHECK(ok, "m4 map gle=%lu\n", GetLastError());
     va = (volatile uint32_t *)(uintptr_t)mp.out.user_va;
-    CHECK(va[0x100 / 4] == 1, "m4 pre-reset CSM read=%u\n", va[0x100 / 4]);
+    if (g_simOracle) {
+        CHECK(va[0x100 / 4] == 1, "m4 pre-reset CSM read=%u\n", va[0x100 / 4]);
+    } else {
+        CHECK(HeartbeatAdvances(worker, 1500),
+              "m4 pre-reset heartbeat health check failed\n");
+    }
 
     // Invalid reset flag -> INVALID_PARAMETER.
     memset(&rd, 0, sizeof(rd));
@@ -953,9 +1157,18 @@ static int RunSoak(const WCHAR *path, int cycles)
             printf("soak %d: map gle=%lu\n", i, GetLastError());
             return 1;
         }
-        if (*(volatile uint32_t *)(uintptr_t)(mp.out.user_va + 0x100) != 1) {
-            printf("soak %d: csm readback mismatch\n", i);
-            return 1;
+        if (g_simOracle) {
+            if (*(volatile uint32_t *)(uintptr_t)(mp.out.user_va + 0x100) != 1) {
+                printf("soak %d: csm readback mismatch\n", i);
+                return 1;
+            }
+        } else if ((i + 1) % 100 == 0) {
+            // Silicon: heartbeat health check once per 100 iterations instead of
+            // a per-cycle CSM oracle read.
+            if (!HeartbeatAdvances(h, 1500)) {
+                printf("soak %d: heartbeat health check failed\n", i);
+                return 1;
+            }
         }
         memset(&ab, 0, sizeof(ab));
         ab.in.requested_size = 64 * 1024;
@@ -987,22 +1200,217 @@ static int RunSoak(const WCHAR *path, int cycles)
     return 0;
 }
 
+// Parse a comma-separated --only list into a selector bitmask. Unknown tokens
+// count as a failure (so the exit code reflects the typo) and are skipped.
+static unsigned ParseSelectors(const WCHAR *list)
+{
+    static const struct { const WCHAR *name; unsigned bit; } tbl[] = {
+        { L"info", SEL_INFO }, { L"mappings", SEL_MAPPINGS },
+        { L"negative", SEL_NEGATIVE }, { L"firmware", SEL_FIRMWARE },
+        { L"telemetry", SEL_TELEMETRY }, { L"tlb", SEL_TLB },
+        { L"dma", SEL_DMA }, { L"pin", SEL_PIN },
+    };
+    unsigned mask = 0;
+    const WCHAR *p = list;
+
+    while (*p) {
+        const WCHAR *start = p;
+        size_t n, k;
+        BOOL matched = FALSE;
+
+        while (*p && *p != L',') {
+            p++;
+        }
+        n = (size_t)(p - start);
+        for (k = 0; k < ARRAYSIZE(tbl); k++) {
+            if (wcslen(tbl[k].name) == n && wcsncmp(start, tbl[k].name, n) == 0) {
+                mask |= tbl[k].bit;
+                matched = TRUE;
+                break;
+            }
+        }
+        if (!matched) {
+            wprintf(L"FAIL: unknown --only selector '%.*s'\n", (int)n, start);
+            g_failures++;
+        }
+        if (*p == L',') {
+            p++;
+        }
+    }
+    return mask;
+}
+
+// Lightweight device-id probe (no CHECKs) so selector-driven runs can route on
+// isRealDevice/deviceId even when the `info` rung is not selected.
+static void ProbeDevice(HANDLE h, int *isRealDevice, int *deviceId)
+{
+    struct tenstorrent_get_device_info arg;
+    DWORD info;
+
+    memset(&arg, 0, sizeof(arg));
+    arg.in.output_size_bytes = sizeof(arg.out);
+    if (TtIoctl(h, IOCTL_TENSTORRENT_GET_DEVICE_INFO, &arg, sizeof(arg),
+                sizeof(arg), &info)) {
+        *isRealDevice = (arg.out.vendor_id != 0);
+        *deviceId = arg.out.device_id;
+    } else {
+        *isRealDevice = 0;
+        *deviceId = 0;
+    }
+}
+
+// Issue one RESET_DEVICE flavor on `h`; assert the ioctl succeeded and
+// out.result==0, and print out.result. Returns the ioctl success.
+static BOOL IssueReset(HANDLE h, uint32_t flavor, const char *name)
+{
+    struct tenstorrent_reset_device rd;
+    DWORD info;
+    BOOL ok;
+
+    memset(&rd, 0, sizeof(rd));
+    rd.in.output_size_bytes = sizeof(rd.out);
+    rd.in.flags = flavor;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
+    CHECK(ok, "reset(%s) ioctl gle=%lu\n", name, GetLastError());
+    CHECK(ok && rd.out.result == 0, "reset(%s) out.result=%u\n", name, rd.out.result);
+    printf("reset: %s out.result=%u\n", name, ok ? rd.out.result : (uint32_t)-1);
+    return ok;
+}
+
+// DESTRUCTIVE: open a fresh handle, issue the requested RESET_DEVICE flavor,
+// print out.result, then run the heartbeat health check (#2/#5) on that handle.
+// `restore-then-post` issues RESTORE_STATE then POST_RESET.
+static void DoResetFlavor(const WCHAR *path, const WCHAR *flavor)
+{
+    HANDLE h;
+    BOOL alive;
+    // Only flavors that leave the chip live and OUT of the reset window can
+    // be health-asserted: user/asic/asic-dmc set needs_hw_init (telemetry is
+    // gated NOT_READY until --reset post), config-write leaves the chip mid-
+    // reset, and pcie-link tears down the device stack entirely. For those
+    // the heartbeat result is informational, not a failure.
+    BOOL expectLive = (wcscmp(flavor, L"restore") == 0 ||
+                       wcscmp(flavor, L"post") == 0 ||
+                       wcscmp(flavor, L"restore-then-post") == 0);
+
+    h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                    OPEN_EXISTING, 0, NULL);
+    CHECK(h != INVALID_HANDLE_VALUE, "reset open gle=%lu\n", GetLastError());
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    if (wcscmp(flavor, L"restore") == 0) {
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_RESTORE_STATE, "restore");
+    } else if (wcscmp(flavor, L"pcie-link") == 0) {
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK, "pcie-link");
+    } else if (wcscmp(flavor, L"config-write") == 0) {
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_CONFIG_WRITE, "config-write");
+    } else if (wcscmp(flavor, L"user") == 0) {
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_USER_RESET, "user");
+    } else if (wcscmp(flavor, L"asic") == 0) {
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_ASIC_RESET, "asic");
+    } else if (wcscmp(flavor, L"asic-dmc") == 0) {
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET, "asic-dmc");
+    } else if (wcscmp(flavor, L"post") == 0) {
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_POST_RESET, "post");
+    } else if (wcscmp(flavor, L"restore-then-post") == 0) {
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_RESTORE_STATE, "restore");
+        IssueReset(h, TENSTORRENT_RESET_DEVICE_POST_RESET, "post");
+    } else {
+        g_failures++;
+        wprintf(L"FAIL: unknown --reset flavor '%s'\n", flavor);
+        CloseHandle(h);
+        return;
+    }
+
+    // Health check after the reset flavor, on the same fresh handle. Only
+    // asserted for flavors that leave the device readable (see expectLive).
+    alive = HeartbeatAdvances(h, 1500);
+    if (expectLive) {
+        CHECK(alive, "reset(%ls) post-reset heartbeat did not advance\n", flavor);
+        printf("reset: post-reset health %s\n",
+               alive ? "PASS (heartbeat advancing)" : "FAIL (heartbeat stalled)");
+    } else {
+        printf("reset: post-reset heartbeat %s (informational — this flavor "
+               "opens a reset window or tears down the stack; follow with "
+               "--reset post, or re-enumerate for pcie-link)\n",
+               alive ? "advancing" : "not readable");
+    }
+
+    CloseHandle(h);
+}
+
+static void Usage(const WCHAR *argv0)
+{
+    wprintf(L"usage: %s [options]\n", argv0);
+    printf(
+        "  (no args)         read-only-safe: driver/device info, mappings,\n"
+        "                    negative cases, telemetry dump. No resets, no\n"
+        "                    TLB/DMA/pin writes. Safe on real silicon.\n"
+        "  --only <list>     run only these comma-separated rungs:\n"
+        "                      info mappings negative firmware telemetry\n"
+        "                      tlb dma pin\n"
+        "  --reset <flavor>  DESTRUCTIVE: issue one RESET_DEVICE flavor on a\n"
+        "                    fresh handle, print out.result, then a heartbeat\n"
+        "                    health check. Flavors:\n"
+        "                      restore pcie-link config-write user asic\n"
+        "                      asic-dmc post restore-then-post\n"
+        "  --all-legacy      reproduce the full legacy ttsim sweep, including\n"
+        "                    the DESTRUCTIVE M4 reset (implies --sim-oracle).\n"
+        "  --sim-oracle      keep ttsim exact-equality checks (board id, AICLK,\n"
+        "                    CSM liveness). Default off = silicon mode.\n"
+        "  --soak N          open/alloc/map/pin/close soak, N cycles.\n"
+        "  --storm N         DESTRUCTIVE reset storm, N iterations.\n"
+        "  --help            this text.\n");
+}
+
 int wmain(int argc, wchar_t **argv)
 {
     WCHAR *list, *path;
     ULONG len = 0;
     int devices = 0;
     int soakCycles = 0;
+    int stormIters = 0;
+    BOOL allLegacy = FALSE;
+    BOOL haveOnly = FALSE;
+    unsigned onlyMask = 0;
+    unsigned mask;
+    const WCHAR *resetFlavor = NULL;
+    int resetDone = 0;
+    int argi;
     CONFIGRET cr;
 
-    int stormIters = 0;
+    for (argi = 1; argi < argc; argi++) {
+        if (wcscmp(argv[argi], L"--sim-oracle") == 0) {
+            g_simOracle = TRUE;
+        } else if (wcscmp(argv[argi], L"--all-legacy") == 0) {
+            allLegacy = TRUE;
+            g_simOracle = TRUE;   // legacy sweep runs the ttsim oracles
+        } else if (wcscmp(argv[argi], L"--only") == 0 && argi + 1 < argc) {
+            haveOnly = TRUE;
+            onlyMask |= ParseSelectors(argv[++argi]);
+        } else if (wcscmp(argv[argi], L"--reset") == 0 && argi + 1 < argc) {
+            resetFlavor = argv[++argi];
+        } else if (wcscmp(argv[argi], L"--soak") == 0 && argi + 1 < argc) {
+            soakCycles = _wtoi(argv[++argi]);
+        } else if (wcscmp(argv[argi], L"--storm") == 0 && argi + 1 < argc) {
+            stormIters = _wtoi(argv[++argi]);
+        } else if (wcscmp(argv[argi], L"--help") == 0 ||
+                   wcscmp(argv[argi], L"-h") == 0 ||
+                   wcscmp(argv[argi], L"/?") == 0) {
+            Usage(argv[0]);
+            return 0;
+        } else {
+            wprintf(L"FAIL: unrecognized argument '%s'\n", argv[argi]);
+            Usage(argv[0]);
+            return 1;
+        }
+    }
 
-    if (argc >= 3 && wcscmp(argv[1], L"--soak") == 0) {
-        soakCycles = _wtoi(argv[2]);
-    }
-    if (argc >= 3 && wcscmp(argv[1], L"--storm") == 0) {
-        stormIters = _wtoi(argv[2]);
-    }
+    // Effective selector set: explicit --only, else the read-only-safe default.
+    mask = haveOnly ? onlyMask : SEL_DEFAULT;
 
     cr = CM_Get_Device_Interface_List_SizeW(
         &len, (LPGUID)&GUID_DEVINTERFACE_TENSTORRENT, NULL,
@@ -1036,6 +1444,7 @@ int wmain(int argc, wchar_t **argv)
             printf("FAIL: CreateFile gle=%lu\n", GetLastError());
             continue;
         }
+
         if (soakCycles > 0 || stormIters > 0) {
             CloseHandle(h);
             if (wcsstr(path, L"PCI#VEN_1E52") != NULL) {
@@ -1045,23 +1454,77 @@ int wmain(int argc, wchar_t **argv)
             continue;
         }
 
-        TestDriverInfo(h);
-        TestDeviceInfo(h, &isRealDevice, &deviceId);
-        TestQueryMappings(h, isRealDevice);
-        TestNegative(h);
-        TestM2Firmware(h, deviceId);
-        TestM3Memory(h, deviceId);
-        TestM5(path, h, deviceId);
-        CloseHandle(h);
-
-        if (isRealDevice) {
-            TestM4Reset(path, deviceId);
+        if (resetFlavor != NULL) {
+            // DESTRUCTIVE resets run only against the real PCI device.
+            CloseHandle(h);
+            if (wcsstr(path, L"PCI#VEN_1E52") != NULL) {
+                DoResetFlavor(path, resetFlavor);
+                resetDone = 1;
+            }
+            continue;
         }
+
+        if (allLegacy) {
+            // Full legacy sweep (ttsim QEMU rig regression), same order as before
+            // the split; TestM3{Tlb,Dma,Pin} together == the old TestM3Memory.
+            TestDriverInfo(h);
+            TestDeviceInfo(h, &isRealDevice, &deviceId);
+            TestQueryMappings(h, isRealDevice);
+            TestNegative(h);
+            TestM2Firmware(h, deviceId);
+            TestM3Tlb(h, deviceId);
+            TestM3Dma(h, deviceId);
+            TestM3Pin(h, deviceId);
+            TestM5(path, h, deviceId);
+            CloseHandle(h);
+            if (isRealDevice) {
+                TestM4Reset(path, deviceId);
+            }
+            continue;
+        }
+
+        // Selector-driven run (read-only default set, or explicit --only).
+        ProbeDevice(h, &isRealDevice, &deviceId);
+        if (mask & SEL_INFO) {
+            TestDriverInfo(h);
+            TestDeviceInfo(h, &isRealDevice, &deviceId);
+        }
+        if (mask & SEL_MAPPINGS) {
+            TestQueryMappings(h, isRealDevice);
+        }
+        if (mask & SEL_NEGATIVE) {
+            TestNegative(h);
+        }
+        if (mask & SEL_FIRMWARE) {
+            TestM2Firmware(h, deviceId);
+        }
+        if (mask & SEL_TELEMETRY) {
+            TestTelemetryDump(h, deviceId);
+        }
+        if (mask & SEL_TLB) {
+            TestM3Tlb(h, deviceId);
+        }
+        if (mask & SEL_DMA) {
+            TestM3Dma(h, deviceId);
+        }
+        if (mask & SEL_PIN) {
+            TestM3Pin(h, deviceId);
+        }
+        CloseHandle(h);
     }
 
     if (soakCycles > 0 || stormIters > 0) {
         printf("no PCI device found\n");
         return 2;
+    }
+    if (resetFlavor != NULL && !resetDone) {
+        printf("note: --reset requested but no real PCI (VEN_1E52) device found\n");
+    }
+
+    if (!allLegacy && !haveOnly && resetFlavor == NULL) {
+        printf("\nnotice: bare run is read-only-safe. Deeper rungs need --only\n"
+               "        <list> (e.g. tlb,dma,pin) or --reset <flavor> (DESTRUCTIVE);\n"
+               "        --all-legacy runs the full ttsim sweep. See --help.\n");
     }
 
     printf("\nttinfo: %d device(s), %d failure(s)\n", devices, g_failures);
