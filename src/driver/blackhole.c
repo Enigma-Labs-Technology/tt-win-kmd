@@ -519,6 +519,93 @@ TtBhTelemetryProbe(
     return STATUS_SUCCESS;
 }
 
+// Reset marker (pcie.c:140-149) and timer interrupt (pcie.c:133-138) via the
+// device's own config space. Local here to keep blackhole_reset self-contained;
+// reset.c has equivalent statics for its own flavors.
+#define TT_PCI_COMMAND 0x04
+#define TT_PCI_COMMAND_PARITY 0x40
+
+static VOID
+TtBhSetResetMarker(
+    _In_ struct _TT_DEVICE_CONTEXT *Context
+    )
+{
+    USHORT command;
+
+    if (TtCfgReadWord(Context, TT_PCI_COMMAND, &command)) {
+        TtCfgWriteWord(Context, TT_PCI_COMMAND,
+                       (USHORT)(command | TT_PCI_COMMAND_PARITY));
+    }
+}
+
+static BOOLEAN
+TtBhTimerInterrupt(
+    _In_ struct _TT_DEVICE_CONTEXT *Context
+    )
+{
+    TtCfgWriteDword(Context, 0x934, 0x1);
+    TtCfgWriteDword(Context, 0x930, 0x11);
+    return TRUE;
+}
+
+// blackhole_reset (blackhole.c:542-570). ASIC_RESET: marker + timer interrupt
+// (config-write trigger). ASIC_DMC_RESET: TEST-then-TRIGGER_RESET via the ARC
+// message queue (payload 3 = ASIC + M3). Called under the reset resource.
+_Use_decl_annotations_
+BOOLEAN
+TtBhReset(
+    struct _TT_DEVICE_CONTEXT *Context,
+    UINT32 Flags
+    )
+{
+    if (Flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
+        TT_ARC_MSG msg;
+
+        // Confirm FW/NOC alive first (blackhole.c:551-555).
+        RtlZeroMemory(&msg, sizeof(msg));
+        msg.Header = TT_ARC_MSG_TYPE_TEST;
+        if (!TtBhSendArcMessage(Context, &msg)) {
+            TraceLoggingWrite(g_TtTraceProvider, "ResetNocHung");
+            return FALSE;
+        }
+
+        TtBhSetResetMarker(Context);
+
+        RtlZeroMemory(&msg, sizeof(msg));
+        msg.Header = TT_ARC_MSG_TYPE_TRIGGER_RESET;
+        msg.Payload[0] = 3;   // ASIC + M3 reset
+        (VOID)TtBhSendArcMessage(Context, &msg);
+        return TRUE;          // "Possibly a lie..." (blackhole.c:562)
+    }
+
+    // ASIC_RESET (blackhole.c:564-567): marker + config-write trigger.
+    TtBhSetResetMarker(Context);
+    return TtBhTimerInterrupt(Context);
+}
+
+// blackhole_init_hardware (blackhole.c:620-639): MRRS, ASIC_STATE0, then
+// SET_WDT_TIMEOUT (tolerated on failure for old FW). Always returns true.
+_Use_decl_annotations_
+BOOLEAN
+TtBhInitHardware(
+    struct _TT_DEVICE_CONTEXT *Context
+    )
+{
+    TT_ARC_MSG msg;
+
+    RtlZeroMemory(&msg, sizeof(msg));
+    msg.Header = TT_ARC_MSG_TYPE_ASIC_STATE0;   // 0xA0
+    (VOID)TtBhSendArcMessage(Context, &msg);
+
+    RtlZeroMemory(&msg, sizeof(msg));
+    msg.Header = TT_ARC_MSG_TYPE_SET_WDT_TIMEOUT;   // 0xC1
+    msg.Payload[0] = 0;   // auto_reset_timeout disabled by default (module.c)
+    (VOID)TtBhSendArcMessage(Context, &msg);
+
+    TraceLoggingWrite(g_TtTraceProvider, "BhInitHardware");
+    return TRUE;
+}
+
 // blackhole_read_telemetry_tag (blackhole.c:440-453)
 _Use_decl_annotations_
 NTSTATUS

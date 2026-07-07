@@ -354,19 +354,27 @@ TtEvtIoDeviceControl(
     TraceLoggingWrite(g_TtTraceProvider, "IoctlEntry",
                       TraceLoggingUInt32(nr, "nr"));
 
+    // reset_rwsem parity (DD-9): RESET_DEVICE exclusive, all else shared. The
+    // gate check runs under the lock, matching chardev.c:596-624.
+    if (nr == 6) {
+        TtResetAcquireExclusive(context);
+    } else {
+        TtResetAcquireShared(context);
+    }
+
     status = TtCheckIoGates(context, fileObject, nr);
     if (!NT_SUCCESS(status)) {
-        goto complete;
+        goto release;
     }
 
 #ifdef TT_DEBUG_INTERFACES
     if (IoControlCode == IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY) {
         status = TtIoctlDebugReadTelemetry(context, Request);
-        goto complete;
+        goto release;
     }
     if (IoControlCode == IOCTL_TENSTORRENT_DEBUG_ARC_MSG) {
         status = TtIoctlDebugArcMsg(context, Request);
-        goto complete;
+        goto release;
     }
 #endif
 
@@ -382,6 +390,9 @@ TtEvtIoDeviceControl(
         break;
     case 5:
         status = TtIoctlGetDriverInfo(Request);
+        break;
+    case 6:
+        status = TtIoctlResetDevice(context, fileObject, Request);
         break;
     case 11:
         status = TtIoctlAllocateTlb(context, fileObject, Request);
@@ -399,7 +410,8 @@ TtEvtIoDeviceControl(
         break;
     }
 
-complete:
+release:
+    TtResetRelease(context);
     TraceLoggingWrite(g_TtTraceProvider, "IoctlExit",
                       TraceLoggingUInt32(nr, "nr"),
                       TraceLoggingNTStatus(status, "status"));
@@ -439,9 +451,11 @@ TtEvtIoInCallerContext(
     }
 
     // Pin/unpin are Linux ioctls (full gates incl. needs_hw_init); MAP/UNMAP
-    // follow the mmap gate set (no needs_hw_init check, analysis §11).
+    // follow the mmap gate set (no needs_hw_init check, analysis §11). Held
+    // shared so a concurrent reset (exclusive) drains these first (DD-9).
     gateNr = (code == IOCTL_TENSTORRENT_PIN_PAGES) ? 7u :
              (code == IOCTL_TENSTORRENT_UNPIN_PAGES) ? 10u : MAXUINT32;
+    TtResetAcquireShared(context);
     status = TtCheckIoGates(context, fileObject, gateNr);
     if (NT_SUCCESS(status)) {
         if (code == IOCTL_TENSTORRENT_MAP) {
@@ -454,6 +468,7 @@ TtEvtIoInCallerContext(
             status = TtIoctlUnpinPages(context, fileObject, Request);
         }
     }
+    TtResetRelease(context);
 
     TraceLoggingWrite(g_TtTraceProvider, "CallerContextIoctl",
                       TraceLoggingUInt32(code, "code"),

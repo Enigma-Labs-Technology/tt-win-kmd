@@ -72,6 +72,7 @@
     <ClCompile Include="ioctl.c" />
     <ClCompile Include="blackhole.c" />
     <ClCompile Include="memory.c" />
+    <ClCompile Include="reset.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ttkmd.h" />

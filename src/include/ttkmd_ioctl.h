@@ -263,6 +263,31 @@ struct tenstorrent_configure_tlb {
     struct tenstorrent_configure_tlb_out out;
 };
 
+// --- RESET_DEVICE (nr 6), tt-kmd/ioctl.h:142-166 ---
+// flags is an enum value, not a bitmask (chardev.c dispatches with == chains).
+#define TENSTORRENT_RESET_DEVICE_RESTORE_STATE 0
+#define TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK 1
+#define TENSTORRENT_RESET_DEVICE_CONFIG_WRITE 2
+#define TENSTORRENT_RESET_DEVICE_USER_RESET 3
+#define TENSTORRENT_RESET_DEVICE_ASIC_RESET 4
+#define TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET 5
+#define TENSTORRENT_RESET_DEVICE_POST_RESET 6
+
+struct tenstorrent_reset_device_in {
+    uint32_t output_size_bytes;
+    uint32_t flags;
+};
+
+struct tenstorrent_reset_device_out {
+    uint32_t output_size_bytes;
+    uint32_t result;           // 0 = success, 1 = failure (out.result = !ok)
+};
+
+struct tenstorrent_reset_device {
+    struct tenstorrent_reset_device_in in;
+    struct tenstorrent_reset_device_out out;
+};
+
 // --- Windows extensions: MAP/UNMAP (function codes 0x900+, DD-8) ------------
 // Replace mmap/munmap. mmap_offset is the opaque Linux token from
 // QUERY_MAPPINGS.mapping_base / ALLOCATE_DMA_BUF.mapping_offset /

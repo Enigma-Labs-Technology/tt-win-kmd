@@ -46,6 +46,7 @@ TtEvtDeviceAdd(
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpCallbacks);
     pnpCallbacks.EvtDevicePrepareHardware = TtEvtDevicePrepareHardware;
     pnpCallbacks.EvtDeviceReleaseHardware = TtEvtDeviceReleaseHardware;
+    pnpCallbacks.EvtDeviceSurpriseRemoval = TtEvtDeviceSurpriseRemoval;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpCallbacks);
 
     // Per-handle context: reset-generation latch (chardev.c open parity) and
@@ -59,6 +60,7 @@ TtEvtDeviceAdd(
     WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, &attributes);
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, TT_DEVICE_CONTEXT);
+    attributes.EvtCleanupCallback = TtEvtDeviceContextCleanup;
 
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
     if (!NT_SUCCESS(status)) {
@@ -69,6 +71,15 @@ TtEvtDeviceAdd(
 
     context = TtGetDeviceContext(device);
     context->Device = device;
+    InitializeListHead(&context->FileList);
+
+    // reset_rwsem parity (DD-9): serializes RESET_DEVICE (exclusive) against
+    // all other ioctls and mapping ops (shared).
+    status = ExInitializeResourceLite(&context->ResetResource);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    context->ResetResourceInit = TRUE;
 
     // M2 locks: kernel-TLB access serialization (kernel_tlb_mutex parity)
     // and the ARC message transaction lock.
@@ -87,6 +98,10 @@ TtEvtDeviceAdd(
         return status;
     }
     status = WdfWaitLockCreate(&attributes, &context->IatuLock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    status = WdfWaitLockCreate(&attributes, &context->FileListLock);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -145,6 +160,16 @@ TtEvtDeviceFileCreate(
 
     status = TtFileContextInitMemory(FileObject);
 
+    if (NT_SUCCESS(status)) {
+        // Join the device-global file list so a reset can reach this handle's
+        // mappings (VMA-zap parity, DD-9).
+        fileContext->FileObject = FileObject;
+        WdfWaitLockAcquire(context->FileListLock, NULL);
+        InsertTailList(&context->FileList, &fileContext->DeviceLink);
+        fileContext->OnDeviceList = TRUE;
+        WdfWaitLockRelease(context->FileListLock);
+    }
+
     TraceLoggingWrite(g_TtTraceProvider, "FileCreate",
                       TraceLoggingNTStatus(status, "status"));
     WdfRequestComplete(Request, status);
@@ -157,8 +182,23 @@ TtEvtFileCleanup(
     )
 {
     WDFDEVICE device = WdfFileObjectGetDevice(FileObject);
+    PTT_DEVICE_CONTEXT context = TtGetDeviceContext(device);
+    PTT_FILE_CONTEXT fileContext = TtGetFileContext(FileObject);
 
-    TtMemoryFileCleanup(TtGetDeviceContext(device), FileObject);
+    // Take the reset resource shared so cleanup does not race a reset's zap
+    // (release takes reset_rwsem shared, chardev.c:929).
+    TtResetAcquireShared(context);
+
+    if (fileContext->OnDeviceList) {
+        WdfWaitLockAcquire(context->FileListLock, NULL);
+        RemoveEntryList(&fileContext->DeviceLink);
+        fileContext->OnDeviceList = FALSE;
+        WdfWaitLockRelease(context->FileListLock);
+    }
+
+    TtMemoryFileCleanup(context, FileObject);
+
+    TtResetRelease(context);
 }
 
 // PCI segment (GET_DEVICE_INFO pci_domain parity). Multi-segment systems are
@@ -332,8 +372,9 @@ TtEvtDevicePrepareHardware(
     RtlZeroMemory(context->BarBase, sizeof(context->BarBase));
     RtlZeroMemory(barValue, sizeof(barValue));
 
-    // PCI identity via the bus interface (absent on the ROOT-enumerated soft
-    // device: identity stays zero and no BARs are recorded).
+    // PCI identity + config access via the bus interface. Kept referenced for
+    // the driver lifetime (reset primitives use it); released in ReleaseHardware.
+    // Absent on the ROOT-enumerated soft device.
     status = WdfFdoQueryForInterface(Device, &GUID_BUS_INTERFACE_STANDARD,
                                      (PINTERFACE)&busIf, sizeof(busIf), 1,
                                      NULL);
@@ -341,6 +382,8 @@ TtEvtDevicePrepareHardware(
         PCI_COMMON_HEADER header;
 
         haveBusIf = TRUE;
+        context->BusInterface = busIf;
+        context->BusInterfaceValid = TRUE;
         if (busIf.GetBusData(busIf.Context, PCI_WHICHSPACE_CONFIG, &header, 0,
                              sizeof(header)) == sizeof(header)) {
             ULONG busNumber = 0;
@@ -448,9 +491,7 @@ TtEvtDevicePrepareHardware(
                       TraceLoggingUInt16(context->DeviceId, "deviceId"),
                       TraceLoggingUInt16(context->BusDevFn, "busDevFn"));
 
-    if (haveBusIf && busIf.InterfaceDereference != NULL) {
-        busIf.InterfaceDereference(busIf.Context);
-    }
+    // busIf reference is retained in context (released in ReleaseHardware).
     return STATUS_SUCCESS;
 }
 
@@ -469,6 +510,46 @@ TtEvtDeviceReleaseHardware(
     RtlZeroMemory(context->BarLength, sizeof(context->BarLength));
     RtlZeroMemory(context->BarBase, sizeof(context->BarBase));
 
+    if (context->BusInterfaceValid) {
+        if (context->BusInterface.InterfaceDereference != NULL) {
+            context->BusInterface.InterfaceDereference(context->BusInterface.Context);
+        }
+        context->BusInterfaceValid = FALSE;
+    }
+
     TraceLoggingWrite(g_TtTraceProvider, "ReleaseHardware");
     return STATUS_SUCCESS;
+}
+
+_Use_decl_annotations_
+VOID
+TtEvtDeviceSurpriseRemoval(
+    WDFDEVICE Device
+    )
+{
+    PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
+
+    // Surprise removal: mark detached (gate returns STATUS_DEVICE_REMOVED for
+    // everything) and revoke user mappings so stale accesses fault rather than
+    // dangle. Under the reset resource exclusive for a stable snapshot.
+    TtResetAcquireExclusive(context);
+    context->Detached = TRUE;
+    TtResetZapMappings(context);
+    TtResetRelease(context);
+
+    TraceLoggingWrite(g_TtTraceProvider, "SurpriseRemoval");
+}
+
+_Use_decl_annotations_
+VOID
+TtEvtDeviceContextCleanup(
+    WDFOBJECT Device
+    )
+{
+    PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
+
+    if (context->ResetResourceInit) {
+        ExDeleteResourceLite(&context->ResetResource);
+        context->ResetResourceInit = FALSE;
+    }
 }

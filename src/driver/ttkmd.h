@@ -3,6 +3,7 @@
 
 #include <ntddk.h>
 #include <wdf.h>
+#include <wdmguid.h>
 
 #include "trace.h"
 
@@ -68,10 +69,25 @@ typedef struct _TT_DEVICE_CONTEXT {
     BOOLEAN IsBlackhole;
 
     // fd-gating state, semantics per analysis §04.2 (chardev.c:591-706).
-    // M1 wires the checks; M4 (reset paths) makes them fire.
     BOOLEAN Detached;
     BOOLEAN NeedsHwInit;
     volatile LONG64 ResetGen;
+
+    // reset_rwsem parity (DD-9): RESET_DEVICE exclusive, all else shared.
+    ERESOURCE ResetResource;
+    BOOLEAN ResetResourceInit;
+
+    // Device-global list of open file objects, for reset-time mapping zap
+    // (tenstorrent_vma_zap walks every fd). Guarded by FileListLock; the reset
+    // resource held exclusive gives a stable snapshot during zap.
+    WDFWAITLOCK FileListLock;
+    LIST_ENTRY FileList;
+
+    // PCI config-space access for reset primitives (marker, timer interrupt),
+    // referenced across PrepareHardware..ReleaseHardware.
+    BUS_INTERFACE_STANDARD BusInterface;
+    BOOLEAN BusInterfaceValid;
+    ULONG SavedConfigPresent;
 
     // BAR inventory indexed by PCI BAR number (pci_resource_len parity).
     ULONGLONG BarLength[TT_MAX_BARS];
@@ -129,6 +145,8 @@ typedef struct _TT_USER_MAPPING {
     PMDL Mdl;
     SIZE_T Length;
     LONG TlbId;              // -1 unless this maps a TLB window (FREE_TLB -EBUSY)
+    BOOLEAN IsDmaBuf;        // DMA-buffer maps are NOT zapped on reset (Linux parity)
+    PEPROCESS Process;       // creator; needed to unmap from the right address space
 } TT_USER_MAPPING, *PTT_USER_MAPPING;
 
 struct tenstorrent_noc_tlb_config;
@@ -158,6 +176,9 @@ typedef struct _TT_FILE_CONTEXT {
     LIST_ENTRY Mappings;     // TT_USER_MAPPING
     LIST_ENTRY Pinnings;     // TT_PINNING
     PTT_DMABUF DmaBufs[256]; // by buf_index (TENSTORRENT_MAX_DMA_BUFS)
+    LIST_ENTRY DeviceLink;   // membership in TT_DEVICE_CONTEXT.FileList
+    WDFFILEOBJECT FileObject;
+    BOOLEAN OnDeviceList;
 } TT_FILE_CONTEXT, *PTT_FILE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_FILE_CONTEXT, TtGetFileContext)
@@ -165,6 +186,8 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_FILE_CONTEXT, TtGetFileContext)
 EVT_WDF_DRIVER_DEVICE_ADD TtEvtDeviceAdd;
 EVT_WDF_DEVICE_PREPARE_HARDWARE TtEvtDevicePrepareHardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE TtEvtDeviceReleaseHardware;
+EVT_WDF_DEVICE_SURPRISE_REMOVAL TtEvtDeviceSurpriseRemoval;
+EVT_WDF_OBJECT_CONTEXT_CLEANUP TtEvtDeviceContextCleanup;
 EVT_WDF_DEVICE_FILE_CREATE TtEvtDeviceFileCreate;
 EVT_WDF_FILE_CLEANUP TtEvtFileCleanup;
 EVT_WDF_IO_IN_CALLER_CONTEXT TtEvtIoInCallerContext;
@@ -208,3 +231,18 @@ NTSTATUS TtBhConfigureUserTlb(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Id,
                               _In_ const struct tenstorrent_noc_tlb_config *Config);
 NTSTATUS TtBhConfigureOutboundAtu(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Region,
                                   _In_ UINT64 Base, _In_ UINT64 Limit, _In_ UINT64 Target);
+BOOLEAN TtBhReset(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Flags);
+BOOLEAN TtBhInitHardware(_In_ PTT_DEVICE_CONTEXT Context);
+
+// reset.c (maps to tt-kmd chardev.c reset handler + pcie.c primitives)
+NTSTATUS TtIoctlResetDevice(_In_ PTT_DEVICE_CONTEXT Context,
+                            _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+VOID TtResetZapMappings(_In_ PTT_DEVICE_CONTEXT Context);
+BOOLEAN TtCfgReadWord(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _Out_ USHORT *Value);
+VOID TtCfgWriteWord(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _In_ USHORT Value);
+VOID TtCfgWriteDword(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _In_ ULONG Value);
+
+// Reset resource helpers (DD-9). KeEnterCriticalRegion is taken inside.
+VOID TtResetAcquireShared(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtResetAcquireExclusive(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtResetRelease(_In_ PTT_DEVICE_CONTEXT Context);

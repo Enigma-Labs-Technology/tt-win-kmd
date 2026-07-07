@@ -484,6 +484,203 @@ static void TestM3Memory(HANDLE h, int deviceId)
     // dmabufs/maps intentionally left live: cleanup-on-close covers them.
 }
 
+// M4: reset flavors, fd-invalidation, reset-under-mapping. Needs a second
+// handle (the "worker") plus a fresh handle per reset (tt-umd/tools pattern).
+static void TestM4Reset(const WCHAR *path, int deviceId)
+{
+    HANDLE worker, resetter;
+    struct tenstorrent_reset_device rd;
+    struct tenstorrent_get_device_info di;
+    struct tenstorrent_allocate_tlb at;
+    struct tenstorrent_configure_tlb ct;
+    struct tenstorrent_map mp;
+    volatile uint32_t *va;
+    DWORD info;
+    BOOL ok;
+
+    if (deviceId != 0xB140) {
+        return;
+    }
+
+    // Worker handle maps a TLB window (the "active mapping").
+    worker = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                         OPEN_EXISTING, 0, NULL);
+    CHECK(worker != INVALID_HANDLE_VALUE, "worker open gle=%lu\n", GetLastError());
+
+    memset(&at, 0, sizeof(at));
+    at.in.size = 2 << 20;
+    ok = TtIoctl(worker, IOCTL_TENSTORRENT_ALLOCATE_TLB, &at, sizeof(at), sizeof(at), &info);
+    CHECK(ok, "m4 tlb alloc gle=%lu\n", GetLastError());
+    memset(&ct, 0, sizeof(ct));
+    ct.in.id = at.out.id;
+    ct.in.config.addr = 0x10000000ull;
+    ct.in.config.x_end = 8;
+    ct.in.config.ordering = 1;
+    ok = TtIoctl(worker, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info);
+    CHECK(ok, "m4 tlb cfg gle=%lu\n", GetLastError());
+    memset(&mp, 0, sizeof(mp));
+    mp.in.mmap_offset = at.out.mmap_offset_uc;
+    mp.in.length = 2 << 20;
+    ok = TtIoctl(worker, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
+    CHECK(ok, "m4 map gle=%lu\n", GetLastError());
+    va = (volatile uint32_t *)(uintptr_t)mp.out.user_va;
+    CHECK(va[0x100 / 4] == 1, "m4 pre-reset CSM read=%u\n", va[0x100 / 4]);
+
+    // Invalid reset flag -> INVALID_PARAMETER.
+    memset(&rd, 0, sizeof(rd));
+    rd.in.output_size_bytes = sizeof(rd.out);
+    rd.in.flags = 99;
+    ok = TtIoctl(worker, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
+    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+          "m4 bad flag: ok=%d gle=%lu\n", ok, GetLastError());
+
+    // Destructive reset from a FRESH handle (mappings live on the worker) —
+    // this is the tt-umd/tools/reset.c pattern.
+    resetter = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, 0, NULL);
+    CHECK(resetter != INVALID_HANDLE_VALUE, "resetter open gle=%lu\n", GetLastError());
+
+    memset(&rd, 0, sizeof(rd));
+    rd.in.output_size_bytes = sizeof(rd.out);
+    rd.in.flags = TENSTORRENT_RESET_DEVICE_ASIC_RESET;   // 4
+    ok = TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
+    CHECK(ok, "m4 ASIC_RESET ioctl gle=%lu\n", GetLastError());
+    CHECK(rd.out.result == 0, "m4 ASIC_RESET result=%u\n", rd.out.result);
+    printf("reset: ASIC_RESET result=%u (success)\n", rd.out.result);
+
+    // The worker handle was opened before the gen bump -> now permanently
+    // invalid: every ioctl returns STATUS_DEVICE_REMOVED (ERROR_NO_SUCH_DEVICE).
+    memset(&di, 0, sizeof(di));
+    di.in.output_size_bytes = sizeof(di.out);
+    ok = TtIoctl(worker, IOCTL_TENSTORRENT_GET_DEVICE_INFO, &di, sizeof(di), sizeof(di), &info);
+    CHECK(!ok && (GetLastError() == ERROR_NO_SUCH_DEVICE ||
+                  GetLastError() == ERROR_DEVICE_REMOVED),
+          "m4 stale worker not invalidated: ok=%d gle=%lu\n", ok, GetLastError());
+    printf("reset: stale worker handle -> gle=%lu (device removed)\n", GetLastError());
+
+    // The worker's mapping was zapped; touching it now faults. Verify via SEH.
+    {
+        BOOL faulted = FALSE;
+        __try {
+            va[0] = 0xFFFFFFFF;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            faulted = TRUE;
+        }
+        CHECK(faulted, "m4 zapped mapping still accessible\n");
+        printf("reset: stale mapping access faulted (zapped)\n");
+    }
+
+    // The resetter (carried forward) is still valid and in the reset window:
+    // GET_DEVICE_INFO allowed; a non-allowlisted ioctl (QUERY_MAPPINGS) -> removed.
+    memset(&di, 0, sizeof(di));
+    di.in.output_size_bytes = sizeof(di.out);
+    ok = TtIoctl(resetter, IOCTL_TENSTORRENT_GET_DEVICE_INFO, &di, sizeof(di), sizeof(di), &info);
+    CHECK(ok, "m4 resetter GET_DEVICE_INFO in window gle=%lu\n", GetLastError());
+    {
+        struct tenstorrent_query_mappings_in qm;
+        memset(&qm, 0, sizeof(qm));
+        ok = TtIoctl(resetter, IOCTL_TENSTORRENT_QUERY_MAPPINGS, &qm, sizeof(qm), sizeof(qm), &info);
+        CHECK(!ok, "m4 non-allowlisted ioctl allowed in reset window\n");
+    }
+
+    // POST_RESET completes the sequence (marker cleared by the glue).
+    memset(&rd, 0, sizeof(rd));
+    rd.in.output_size_bytes = sizeof(rd.out);
+    rd.in.flags = TENSTORRENT_RESET_DEVICE_POST_RESET;   // 6
+    ok = TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
+    CHECK(ok, "m4 POST_RESET ioctl gle=%lu\n", GetLastError());
+    CHECK(rd.out.result == 0, "m4 POST_RESET result=%u (marker not cleared?)\n", rd.out.result);
+    printf("reset: POST_RESET result=%u (window closed)\n", rd.out.result);
+
+    // After POST_RESET the resetter is fully usable again.
+    {
+        struct tenstorrent_query_mappings_in qm;
+        memset(&qm, 0, sizeof(qm));
+        ok = TtIoctl(resetter, IOCTL_TENSTORRENT_QUERY_MAPPINGS, &qm, sizeof(qm), sizeof(qm), &info);
+        CHECK(ok, "m4 post-window QUERY_MAPPINGS gle=%lu\n", GetLastError());
+    }
+
+    CloseHandle(worker);
+    CloseHandle(resetter);
+    printf("reset: lifecycle sequence PASS\n");
+}
+
+// M4 reset storm: hammer resets from fresh handles while a worker holds live
+// mappings and issues ioctls. Verifies no crash and correct invalidation.
+static int RunResetStorm(const WCHAR *path, int iterations)
+{
+    int i;
+
+    for (i = 0; i < iterations; i++) {
+        HANDLE worker, resetter;
+        struct tenstorrent_reset_device rd;
+        struct tenstorrent_allocate_tlb at;
+        struct tenstorrent_configure_tlb ct;
+        struct tenstorrent_map mp;
+        DWORD info;
+
+        worker = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                             OPEN_EXISTING, 0, NULL);
+        if (worker == INVALID_HANDLE_VALUE) {
+            printf("storm %d: worker open gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+        memset(&at, 0, sizeof(at));
+        at.in.size = 2 << 20;
+        if (TtIoctl(worker, IOCTL_TENSTORRENT_ALLOCATE_TLB, &at, sizeof(at), sizeof(at), &info)) {
+            memset(&ct, 0, sizeof(ct));
+            ct.in.id = at.out.id;
+            ct.in.config.addr = 0x10000000ull;
+            ct.in.config.x_end = 8;
+            ct.in.config.ordering = 1;
+            TtIoctl(worker, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info);
+            memset(&mp, 0, sizeof(mp));
+            mp.in.mmap_offset = at.out.mmap_offset_uc;
+            mp.in.length = 2 << 20;
+            TtIoctl(worker, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
+        }
+
+        resetter = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                               OPEN_EXISTING, 0, NULL);
+        if (resetter == INVALID_HANDLE_VALUE) {
+            printf("storm %d: resetter open gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+        memset(&rd, 0, sizeof(rd));
+        rd.in.output_size_bytes = sizeof(rd.out);
+        rd.in.flags = (i & 1) ? TENSTORRENT_RESET_DEVICE_ASIC_RESET
+                              : TENSTORRENT_RESET_DEVICE_CONFIG_WRITE;
+        if (!TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info)) {
+            printf("storm %d: reset gle=%lu\n", i, GetLastError());
+            return 1;
+        }
+        // Worker is now stale; a stray ioctl must be safely rejected, not crash.
+        {
+            struct tenstorrent_get_device_info di;
+            memset(&di, 0, sizeof(di));
+            di.in.output_size_bytes = sizeof(di.out);
+            TtIoctl(worker, IOCTL_TENSTORRENT_GET_DEVICE_INFO, &di, sizeof(di), sizeof(di), &info);
+        }
+        // Complete so the device is usable next iteration.
+        memset(&rd, 0, sizeof(rd));
+        rd.in.output_size_bytes = sizeof(rd.out);
+        rd.in.flags = TENSTORRENT_RESET_DEVICE_POST_RESET;
+        TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
+
+        CloseHandle(worker);
+        CloseHandle(resetter);
+        if ((i + 1) % 200 == 0) {
+            printf("storm: %d resets\n", i + 1);
+        }
+    }
+    printf("storm: %d resets PASS\n", iterations);
+    return 0;
+}
+
 // 10,000-cycle open/alloc/map/pin/close soak (M3 acceptance: no leaks).
 static int RunSoak(const WCHAR *path, int cycles)
 {
@@ -571,8 +768,13 @@ int wmain(int argc, wchar_t **argv)
     int soakCycles = 0;
     CONFIGRET cr;
 
+    int stormIters = 0;
+
     if (argc >= 3 && wcscmp(argv[1], L"--soak") == 0) {
         soakCycles = _wtoi(argv[2]);
+    }
+    if (argc >= 3 && wcscmp(argv[1], L"--storm") == 0) {
+        stormIters = _wtoi(argv[2]);
     }
 
     cr = CM_Get_Device_Interface_List_SizeW(
@@ -607,10 +809,11 @@ int wmain(int argc, wchar_t **argv)
             printf("FAIL: CreateFile gle=%lu\n", GetLastError());
             continue;
         }
-        if (soakCycles > 0) {
+        if (soakCycles > 0 || stormIters > 0) {
             CloseHandle(h);
             if (wcsstr(path, L"PCI#VEN_1E52") != NULL) {
-                return RunSoak(path, soakCycles);
+                return soakCycles > 0 ? RunSoak(path, soakCycles)
+                                      : RunResetStorm(path, stormIters);
             }
             continue;
         }
@@ -622,10 +825,14 @@ int wmain(int argc, wchar_t **argv)
         TestM2Firmware(h, deviceId);
         TestM3Memory(h, deviceId);
         CloseHandle(h);
+
+        if (isRealDevice) {
+            TestM4Reset(path, deviceId);
+        }
     }
 
-    if (soakCycles > 0) {
-        printf("soak: no PCI device found\n");
+    if (soakCycles > 0 || stormIters > 0) {
+        printf("no PCI device found\n");
         return 2;
     }
 

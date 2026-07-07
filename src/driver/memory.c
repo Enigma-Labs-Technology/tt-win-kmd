@@ -638,6 +638,9 @@ TtBuildPhysicalMdl(
     return mdl;
 }
 
+// Destroys a mapping in the owner's process context (UNMAP and handle cleanup
+// both run there). Not used by the reset zap, which handles cross-process
+// unmapping itself.
 static VOID
 TtDestroyUserMapping(
     _In_ PTT_USER_MAPPING Mapping
@@ -648,6 +651,9 @@ TtDestroyUserMapping(
     }
     if (Mapping->Mdl != NULL) {
         IoFreeMdl(Mapping->Mdl);
+    }
+    if (Mapping->Process != NULL) {
+        ObDereferenceObject(Mapping->Process);
     }
     ExFreePoolWithTag(Mapping, TT_TAG_MAPPING);
 }
@@ -695,6 +701,12 @@ TtIoctlMap(
     }
     mapping->TlbId = tlbId;
     mapping->Length = (SIZE_T)in.length;
+    // DMA-buffer maps are host RAM and are not zapped on reset (Linux parity).
+    mapping->IsDmaBuf = (in.mmap_offset >= TT_MMAP_OFFSET_DMA_BUF);
+    // Creator process, referenced so a cross-process reset zap can attach to
+    // its address space to unmap (DD-9).
+    mapping->Process = PsGetCurrentProcess();
+    ObReferenceObject(mapping->Process);
 
     mapping->Mdl = TtBuildPhysicalMdl(physical, (SIZE_T)in.length);
     if (mapping->Mdl == NULL) {

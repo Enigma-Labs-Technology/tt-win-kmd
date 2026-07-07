@@ -115,6 +115,32 @@ static void ttsim_tick(void *opaque)
               qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + d->tick_ms);
 }
 
+/*
+ * Model the chip reset for the M4 tests. tt-kmd's reset marker is PCI_COMMAND
+ * bit 6 (Parity Error Response), set before a reset and expected to read back 0
+ * after — proof the chip cleared its config space. The reset is triggered by
+ * writing the DWC "interface timer" registers (config 0x930/0x934) or by an ARC
+ * TRIGGER_RESET message. Here: when the driver writes the timer-interrupt
+ * register with FORCE_PENDING, clear the parity marker, mimicking the chip
+ * resetting its own config space. (ttsim itself has no config-space reset path.)
+ */
+#define TTSIM_INTERFACE_TIMER_CONTROL 0x930
+#define TTSIM_INTERFACE_FORCE_PENDING 0x10
+
+static void ttsim_config_write(PCIDevice *dev, uint32_t addr, uint32_t val,
+                               int len)
+{
+    pci_default_write_config(dev, addr, val, len);
+
+    if (addr <= TTSIM_INTERFACE_TIMER_CONTROL &&
+        addr + len > TTSIM_INTERFACE_TIMER_CONTROL &&
+        (val & TTSIM_INTERFACE_FORCE_PENDING)) {
+        pci_set_word(dev->config + PCI_COMMAND,
+                     pci_get_word(dev->config + PCI_COMMAND) &
+                     ~PCI_COMMAND_PARITY);
+    }
+}
+
 static void *ttsim_sym(TtsimDev *d, const char *name, Error **errp)
 {
     void *p = dlsym(d->dl, name);
@@ -263,6 +289,7 @@ static void ttsim_class_init(ObjectClass *klass, void *data)
 
     k->realize = ttsim_realize;
     k->exit = ttsim_exit_fn;
+    k->config_write = ttsim_config_write;
     k->vendor_id = TT_VENDOR_ID;
     k->device_id = TT_DEVICE_ID_BLACKHOLE;
     k->class_id = PCI_CLASS_PROCESSOR_CO;
