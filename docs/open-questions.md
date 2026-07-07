@@ -25,8 +25,13 @@ implemented and calling it is a fatal error"); BAR base registers are readable.
 
 **Isolation:** `TTSIM_GLUE_BAR_SIZES[]` table in `test/qemu-ttsim/ttsim-dev.c`.
 
-**Status:** Open; resolve when `linux-driver-analysis.md` lands the Blackhole BAR
-table.
+**Status:** Partially resolved by analysis §07: tt-kmd requires BAR0 ≥ `0x1FE00000`
+(driver maps three sub-ranges; real device ≈512 MB), BAR2 = DWC PCIe controller
+register space (driver maps in full; only iATU block at +0x1000 used), BAR4 =
+N × 4 GiB TLB windows with the driver clamping N to the actual BAR length
+(`tlb_counts[1] = bar4_len / 4GB`, so the glue may advertise as little as one
+4 GiB window). Exact sizes to be cross-checked against ttsim's own BAR layout in
+`ttsim/src/config.h` when the glue is built (M1).
 
 ## OQ-2: Default ACL for the device interface
 
