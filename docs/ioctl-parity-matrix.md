@@ -67,6 +67,13 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | IOCTL_TENSTORRENT_SET_CLIENT_FLAGS | `0x80FA2408` | Declares power-aware client immediately after open | `open(..., O_APPEND)` | design-pending (analysis §03) |
 | IOCTL_TENSTORRENT_QUERY_STABLE_ID | `0x80FA240C` | ASIC-ID-based stable identity | `/dev/tenstorrent/by-id/*` udev symlinks | design-pending (analysis §01 naming scheme) |
 
+## Debug-only ioctls (function codes from 0xA00; compiled only with TT_DEBUG_INTERFACES)
+
+| Win name | CTL_CODE | Purpose | Linux construct replaced | Parity |
+|---|---|---|---|---|
+| IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY | `0x80FA2800` | Read one telemetry tag (errno parity with read_telemetry_tag: ≥128 → INVALID_PARAMETER, absent → NOT_FOUND) | debugfs/telemetry inspection | **tested** (M2) |
+| IOCTL_TENSTORRENT_DEBUG_ARC_MSG | `0x80FA2804` | Synchronous ARC message round-trip (send_arc_message contract) | debugfs-style poke | **tested** (M2, TEST 0x90 vs ttsim) |
+
 **Rules:** rows change status only in the same commit as the code they describe.
 Every `design-pending` must resolve to a documented design (DD-N) before its
 milestone completes. GET_HARVESTING's struct is not defined in `ioctl.h` — filled
