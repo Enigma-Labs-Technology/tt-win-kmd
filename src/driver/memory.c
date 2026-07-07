@@ -501,7 +501,10 @@ unlock:
 // MAP / UNMAP (DD-8; decode parity with tenstorrent_mmap, memory.c:1585-1636)
 // ---------------------------------------------------------------------------
 
-// Resolves an mmap-offset token to (physical range, cache type, tlb id).
+// Resolves an mmap-offset token to (CPU physical range, cache type, tlb id).
+// The physical address is what the user MDL is built from, so for DMA buffers
+// it is the CPU physical of the buffer (MmGetPhysicalAddress), not the bus
+// (logical) address handed to the device.
 static NTSTATUS
 TtResolveMapTarget(
     _In_ PTT_DEVICE_CONTEXT Context,
@@ -510,13 +513,11 @@ TtResolveMapTarget(
     _In_ UINT64 Length,
     _Out_ PHYSICAL_ADDRESS *Physical,
     _Out_ MEMORY_CACHING_TYPE *CacheType,
-    _Out_ PVOID *CommonBufferVa,   // non-NULL for DMA-buffer maps
     _Out_ LONG *TlbId
     )
 {
     static const ULONG regionToBar[6] = { 0, 0, 2, 2, 4, 4 };
 
-    *CommonBufferVa = NULL;
     *TlbId = -1;
 
     if (MmapOffset >= TT_MMAP_OFFSET_DMA_BUF) {
@@ -533,9 +534,8 @@ TtResolveMapTarget(
         if (dmabuf == NULL || Length > dmabuf->Size) {
             return STATUS_INVALID_PARAMETER;
         }
-        Physical->QuadPart = (LONGLONG)
-            WdfCommonBufferGetAlignedLogicalAddress(dmabuf->Buffer).QuadPart;
-        *CommonBufferVa = WdfCommonBufferGetAlignedVirtualAddress(dmabuf->Buffer);
+        *Physical = MmGetPhysicalAddress(
+            WdfCommonBufferGetAlignedVirtualAddress(dmabuf->Buffer));
         *CacheType = MmCached;
         return STATUS_SUCCESS;
     }
@@ -604,6 +604,40 @@ TtResolveMapTarget(
     return STATUS_INVALID_PARAMETER;
 }
 
+// Builds an MDL describing physical pages [Physical, Physical+Length) — device
+// BAR pages or a common buffer's contiguous pages. This is the correct way to
+// expose device/IO physical memory to user mode; MmBuildMdlForNonPagedPool
+// only works for nonpaged-pool VAs and produces wrong PFNs for either case.
+static PMDL
+TtBuildPhysicalMdl(
+    _In_ PHYSICAL_ADDRESS Physical,
+    _In_ SIZE_T Length
+    )
+{
+    PMDL mdl = IoAllocateMdl(NULL, (ULONG)Length, FALSE, FALSE, NULL);
+    PPFN_NUMBER pfns;
+    PFN_NUMBER basePfn;
+    ULONG pageCount;
+    ULONG i;
+
+    if (mdl == NULL) {
+        return NULL;
+    }
+    pageCount = (ULONG)BYTES_TO_PAGES(Length);
+    basePfn = (PFN_NUMBER)(Physical.QuadPart >> PAGE_SHIFT);
+    pfns = MmGetMdlPfnArray(mdl);
+    for (i = 0; i < pageCount; i++) {
+        pfns[i] = basePfn + i;
+    }
+    // Marking a hand-built physical MDL "locked" is the sanctioned idiom for
+    // exposing device/IO memory to user mode (WDK mapmem sample); the pages are
+    // fixed device/contiguous frames, not pageable RAM. CA flags the opaque
+    // write generically.
+#pragma warning(suppress: 28145)
+    mdl->MdlFlags |= MDL_PAGES_LOCKED;
+    return mdl;
+}
+
 static VOID
 TtDestroyUserMapping(
     _In_ PTT_USER_MAPPING Mapping
@@ -614,9 +648,6 @@ TtDestroyUserMapping(
     }
     if (Mapping->Mdl != NULL) {
         IoFreeMdl(Mapping->Mdl);
-    }
-    if (Mapping->KernelVa != NULL) {
-        MmUnmapIoSpace(Mapping->KernelVa, Mapping->Length);
     }
     ExFreePoolWithTag(Mapping, TT_TAG_MAPPING);
 }
@@ -634,10 +665,8 @@ TtIoctlMap(
     struct tenstorrent_map_out out;
     PHYSICAL_ADDRESS physical;
     MEMORY_CACHING_TYPE cacheType;
-    PVOID commonBufferVa;
     LONG tlbId;
     PTT_USER_MAPPING mapping = NULL;
-    PVOID mapBase;
     NTSTATUS status;
 
     status = TtCopyInBuffer(Request, &in, sizeof(in));
@@ -652,8 +681,7 @@ TtIoctlMap(
     WdfWaitLockAcquire(fileContext->Lock, NULL);
 
     status = TtResolveMapTarget(Context, fileContext, in.mmap_offset,
-                                in.length, &physical, &cacheType,
-                                &commonBufferVa, &tlbId);
+                                in.length, &physical, &cacheType, &tlbId);
     if (!NT_SUCCESS(status)) {
         goto unlock;
     }
@@ -668,25 +696,11 @@ TtIoctlMap(
     mapping->TlbId = tlbId;
     mapping->Length = (SIZE_T)in.length;
 
-    if (commonBufferVa != NULL) {
-        mapping->KernelVa = NULL;   // owned by the WDFCOMMONBUFFER
-        mapBase = commonBufferVa;
-    } else {
-        mapping->KernelVa = MmMapIoSpaceEx(physical, (SIZE_T)in.length,
-                                           PAGE_READWRITE | PAGE_NOCACHE);
-        if (mapping->KernelVa == NULL) {
-            status = STATUS_INSUFFICIENT_RESOURCES;
-            goto fail;
-        }
-        mapBase = mapping->KernelVa;
-    }
-
-    mapping->Mdl = IoAllocateMdl(mapBase, (ULONG)in.length, FALSE, FALSE, NULL);
+    mapping->Mdl = TtBuildPhysicalMdl(physical, (SIZE_T)in.length);
     if (mapping->Mdl == NULL) {
         status = STATUS_INSUFFICIENT_RESOURCES;
         goto fail;
     }
-    MmBuildMdlForNonPagedPool(mapping->Mdl);
 
     __try {
         mapping->UserVa = MmMapLockedPagesSpecifyCache(

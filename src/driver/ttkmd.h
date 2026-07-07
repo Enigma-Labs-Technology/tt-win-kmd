@@ -120,12 +120,13 @@ typedef struct _TT_DEVICE_CONTEXT {
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_DEVICE_CONTEXT, TtGetDeviceContext)
 
-// One user-mode mapping created by IOCTL_TENSTORRENT_MAP (DD-8).
+// One user-mode mapping created by IOCTL_TENSTORRENT_MAP (DD-8). The MDL is a
+// physical-page MDL (device BAR pages or a common buffer's contiguous pages),
+// not a pool MDL — MmBuildMdlForNonPagedPool cannot describe either.
 typedef struct _TT_USER_MAPPING {
     LIST_ENTRY Entry;
     PVOID UserVa;
     PMDL Mdl;
-    PVOID KernelVa;          // MmMapIoSpaceEx VA for device memory, else NULL
     SIZE_T Length;
     LONG TlbId;              // -1 unless this maps a TLB window (FREE_TLB -EBUSY)
 } TT_USER_MAPPING, *PTT_USER_MAPPING;

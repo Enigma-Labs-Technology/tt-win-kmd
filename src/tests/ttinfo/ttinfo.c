@@ -441,7 +441,7 @@ static void TestM3Memory(HANDLE h, int deviceId)
     memset(pinBuf, 0xAB, 4096);
 
     memset(&pp, 0, sizeof(pp));
-    pp.in.output_size_bytes = sizeof(struct tenstorrent_pin_pages_out_extended);
+    pp.in.output_size_bytes = sizeof(struct tenstorrent_pin_pages_out);
     pp.in.virtual_address = (uint64_t)(uintptr_t)pinBuf;
     pp.in.size = 4096;
     ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &pp, sizeof(pp), sizeof(pp), &info);

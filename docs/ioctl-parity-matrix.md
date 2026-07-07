@@ -43,17 +43,17 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | 0 | GET_DEVICE_INFO | `0x80FA2000` | `tenstorrent_get_device_info` (4/20/24) | BUFFERED | baseline | **tested** (M1, ttinfo vs ttsim) |
 | 1 | GET_HARVESTING | `0x80FA2004` | no struct; Linux has NO handler — falls to default -EINVAL (chardev.c:631-632, 694-696) | BUFFERED | -EINVAL → STATUS_INVALID_PARAMETER | **tested** (stub parity asserted by ttinfo) |
 | 2 | QUERY_MAPPINGS | `0x80FA2008` | `tenstorrent_query_mappings` (8/N×24/8+flex) | BUFFERED | packed UC/WC pairs for existing BARs; min(count,valid) copied + zero-fill (memory.c:393-406) | **tested** (M1, incl. count 0/2/6/16) |
-| 3 | ALLOCATE_DMA_BUF | `0x80FA200C` | `tenstorrent_allocate_dma_buf` (24/40/64) | BUFFERED | baseline | not-started |
-| 4 | FREE_DMA_BUF | `0x80FA2010` | `tenstorrent_free_dma_buf` (0/0/0 — GNU empty struct, illegal in MSVC; Windows defines NO struct, zero-length buffers) | BUFFERED | semantics from analysis §04 (likely -EINVAL/unsupported upstream) | not-started |
+| 3 | ALLOCATE_DMA_BUF | `0x80FA200C` | `tenstorrent_allocate_dma_buf` (24/40/64) | BUFFERED | WdfCommonBuffer; validation order per memory.c:439-458; iATU-before-free | **tested** (M3) |
+| 4 | FREE_DMA_BUF | `0x80FA2010` | no struct (zero-length buffers) | BUFFERED | upstream stub: unconditional -EINVAL (memory.c:515-523) | **tested** (M3) |
 | 5 | GET_DRIVER_INFO | `0x80FA2014` | `tenstorrent_get_driver_info` (4/12/16) | BUFFERED | baseline | **tested** (M1) |
 | 6 | RESET_DEVICE | `0x80FA2018` | `tenstorrent_reset_device` (8/8/16) | BUFFERED | -EBUSY while TLB dmabuf export live → STATUS_DEVICE_BUSY | not-started |
-| 7 | PIN_PAGES | `0x80FA201C` | `tenstorrent_pin_pages` (24/8/32); extended out `tenstorrent_pin_pages_out_extended` (16) via output_size_bytes | BUFFERED | baseline; user VA probed via MmProbeAndLockPages | not-started |
+| 7 | PIN_PAGES | `0x80FA201C` | `tenstorrent_pin_pages` (24/8/32); extended out (16) via output_size_bytes | BUFFERED | MmProbeAndLockPages + PFN-contiguity (direct path); READ_ONLY→NOT_SUPPORTED (no driver IOMMU domain, DD-8) | **functional** (M3; direct path tested, RO negative) |
 | 8 | LOCK_CTL | `0x80FA2020` | `tenstorrent_lock_ctl` (12/4/16) | BUFFERED | ACQUIRE_BLOCKING pends the IRP; cancel → STATUS_CANCELLED (mirrors -EINTR) | not-started |
 | 9 | MAP_PEER_BAR | `0x80FA2024` | `tenstorrent_map_peer_bar` (24/16/40) | BUFFERED | `peer_fd` (u32) carries a Windows HANDLE value of the peer device file; resolved via ObReferenceObjectByHandle — 64-bit handle truncation concern, see OQ (to file) | not-started |
-| 10 | UNPIN_PAGES | `0x80FA2028` | `tenstorrent_unpin_pages` (24/0/24) | BUFFERED | baseline | not-started |
-| 11 | ALLOCATE_TLB | `0x80FA202C` | `tenstorrent_allocate_tlb` (16/32/48) | BUFFERED | baseline | not-started |
-| 12 | FREE_TLB | `0x80FA2030` | `tenstorrent_free_tlb` (4/0/4) | BUFFERED | baseline | not-started |
-| 13 | CONFIGURE_TLB | `0x80FA2034` | `tenstorrent_configure_tlb` (40/8/48); `tenstorrent_noc_tlb_config` = 32 B | BUFFERED | baseline | not-started |
+| 10 | UNPIN_PAGES | `0x80FA2028` | `tenstorrent_unpin_pages` (24/0/24) | BUFFERED | exact VA+size match; MmUnlockPages dirties write-locked pages | **functional** (M3) |
+| 11 | ALLOCATE_TLB | `0x80FA202C` | `tenstorrent_allocate_tlb` (16/32/48) | BUFFERED | exact-size pool (no round-up); single-owner; token encoding memory.c:924-934 | **tested** (M3) |
+| 12 | FREE_TLB | `0x80FA2030` | `tenstorrent_free_tlb` (4/0/4) | BUFFERED | -EPERM if not owner, -EBUSY if mapped (memory.c:955-976) | **tested** (M3) |
+| 13 | CONFIGURE_TLB | `0x80FA2034` | `tenstorrent_configure_tlb` (40/8/48); config 32 B | BUFFERED | -EPERM if not owner; 2M/4G register composition (blackhole.c:112-198) | **tested** (M3) |
 | 14 | SET_NOC_CLEANUP | `0x80FA2038` | `tenstorrent_set_noc_cleanup` (32, argsz protocol) | BUFFERED | baseline | not-started |
 | 15 | SET_POWER_STATE | `0x80FA203C` | `tenstorrent_power_state` (40, argsz protocol) | BUFFERED | baseline | not-started |
 | 16 | EXPORT_TLB_DMABUF | `0x80FA2040` | `tenstorrent_export_tlb_dmabuf` (32, argsz protocol) | BUFFERED | **design-pending:** dma-buf fd has no Windows equivalent; Linux consumer is RDMA P2P (`ibv_reg_dmabuf_mr`). Candidate: not supported initially → STATUS_NOT_SUPPORTED, revisit if tt-umd-on-Windows needs it | not-started |
@@ -62,8 +62,8 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 
 | Win name | CTL_CODE | Purpose | Linux construct replaced | Parity |
 |---|---|---|---|---|
-| IOCTL_TENSTORRENT_MAP | `CTL_CODE(0x80FA, 0x900, ...)` = `0x80FA2400` | Map a BAR range/DMA buf/TLB window into caller VA; input = the `mapping_base`/`mmap_offset_*` value from QUERY_MAPPINGS / ALLOCATE_DMA_BUF / ALLOCATE_TLB + size; output = user VA | `mmap(fd, offset)` | design-pending (M0 analysis §03 mmap offset encoding) |
-| IOCTL_TENSTORRENT_UNMAP | `0x80FA2404` | Unmap a prior MAP by VA | `munmap` | design-pending |
+| IOCTL_TENSTORRENT_MAP | `0x80FA2400` | Map a BAR range/DMA buf/TLB window into caller VA (token + byte offset + length → user VA) | `mmap(fd, offset)` | **tested** (M3, DD-8) |
+| IOCTL_TENSTORRENT_UNMAP | `0x80FA2404` | Unmap a prior MAP by VA | `munmap` | **tested** (M3, DD-8) |
 | IOCTL_TENSTORRENT_SET_CLIENT_FLAGS | `0x80FA2408` | Declares power-aware client immediately after open | `open(..., O_APPEND)` | design-pending (analysis §03) |
 | IOCTL_TENSTORRENT_QUERY_STABLE_ID | `0x80FA240C` | ASIC-ID-based stable identity | `/dev/tenstorrent/by-id/*` udev symlinks | design-pending (analysis §01 naming scheme) |
 
