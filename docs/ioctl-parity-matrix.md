@@ -46,7 +46,7 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | 3 | ALLOCATE_DMA_BUF | `0x80FA200C` | `tenstorrent_allocate_dma_buf` (24/40/64) | BUFFERED | WdfCommonBuffer; validation order per memory.c:439-458; iATU-before-free | **tested** (M3) |
 | 4 | FREE_DMA_BUF | `0x80FA2010` | no struct (zero-length buffers) | BUFFERED | upstream stub: unconditional -EINVAL (memory.c:515-523) | **tested** (M3) |
 | 5 | GET_DRIVER_INFO | `0x80FA2014` | `tenstorrent_get_driver_info` (4/12/16) | BUFFERED | baseline | **tested** (M1) |
-| 6 | RESET_DEVICE | `0x80FA2018` | `tenstorrent_reset_device` (8/8/16) | BUFFERED | -EBUSY while TLB dmabuf export live → STATUS_DEVICE_BUSY | not-started |
+| 6 | RESET_DEVICE | `0x80FA2018` | `tenstorrent_reset_device` (8/8/16) | BUFFERED | 7-flavor dispatch; out.result=!ok; gen-bump → STATUS_DEVICE_REMOVED on stale handles; needs_hw_init window; VMA-zap (DD-9) | **tested** (M4) |
 | 7 | PIN_PAGES | `0x80FA201C` | `tenstorrent_pin_pages` (24/8/32); extended out (16) via output_size_bytes | BUFFERED | MmProbeAndLockPages + PFN-contiguity (direct path); READ_ONLY→NOT_SUPPORTED (no driver IOMMU domain, DD-8) | **functional** (M3; direct path tested, RO negative) |
 | 8 | LOCK_CTL | `0x80FA2020` | `tenstorrent_lock_ctl` (12/4/16) | BUFFERED | ACQUIRE_BLOCKING pends the IRP; cancel → STATUS_CANCELLED (mirrors -EINTR) | not-started |
 | 9 | MAP_PEER_BAR | `0x80FA2024` | `tenstorrent_map_peer_bar` (24/16/40) | BUFFERED | `peer_fd` (u32) carries a Windows HANDLE value of the peer device file; resolved via ObReferenceObjectByHandle — 64-bit handle truncation concern, see OQ (to file) | not-started |

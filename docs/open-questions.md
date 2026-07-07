@@ -83,3 +83,26 @@ NOC TLB windows — which is exactly why `blackhole_init` claims kernel TLB
 window 201 and maps `tlb_regs` (blackhole.c:587-588). M2 therefore requires
 kernel-TLB window programming (config registers at BAR0+0x1FC00000) as its
 first driver deliverable, before any msgqueue traffic.
+
+## OQ-5: Silicon reset refinements deferred from M4
+
+Two reset mechanisms are stubbed for the ttsim rig and must be completed for
+real p150a bring-up (isolated so they are single-function swaps):
+
+1. **Secondary-bus reset (RESET_PCIE_LINK).** A KMDF function driver cannot touch
+   the upstream bridge's config space (pcie.c:61-90 assert/deassert SBR). On the
+   rig this flavor zaps mappings and returns device-present; on silicon it must
+   request a bus/PLDR reset via `GUID_DEVICE_RESET_INTERFACE_STANDARD`
+   (`DeviceReset`). Isolated in `TtIoctlResetDevice` case
+   TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK.
+
+2. **Config save/restore + Max-Payload-Size.** `safe_pci_restore_state` currently
+   reduces to a vendor-ID present check (the rig's fake reset preserves BARs).
+   Silicon needs the pci_save_state/restore snapshot (via BUS_INTERFACE_STANDARD
+   Get/SetBusData at PrepareHardware / after reset) and the DBI-view MPS
+   snapshot (wormhole.c:968-988 / blackhole.c:304-330). Isolated in
+   `TtSafeRestoreState` (reset.c) and the (currently absent) save_reset_state
+   hook.
+
+Neither affects the M4-tested behaviors (fd invalidation, mapping zap,
+reset-window semantics, no-crash under storm/hotplug).
