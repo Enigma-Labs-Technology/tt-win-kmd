@@ -46,6 +46,8 @@ TtEvtDeviceAdd(
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpCallbacks);
     pnpCallbacks.EvtDevicePrepareHardware = TtEvtDevicePrepareHardware;
     pnpCallbacks.EvtDeviceReleaseHardware = TtEvtDeviceReleaseHardware;
+    pnpCallbacks.EvtDeviceD0Entry = TtEvtDeviceD0Entry;
+    pnpCallbacks.EvtDeviceD0Exit = TtEvtDeviceD0Exit;
     pnpCallbacks.EvtDeviceSurpriseRemoval = TtEvtDeviceSurpriseRemoval;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpCallbacks);
 
@@ -112,6 +114,24 @@ TtEvtDeviceAdd(
     status = TtLocksInit(context);   // M5 lock bitmap + wait queue
     if (!NT_SUCCESS(status)) {
         return status;
+    }
+
+    // RESET_PCIE_LINK work item (DD-11): PLDR must run outside the ioctl
+    // path because it surprise-removes this device stack. Creation failure is
+    // non-fatal — TtPldrInitiate then reports an honest failure.
+    {
+        WDF_WORKITEM_CONFIG workItemConfig;
+
+        WDF_WORKITEM_CONFIG_INIT(&workItemConfig, TtPldrWorkItem);
+        WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
+        attributes.ParentObject = device;
+        status = WdfWorkItemCreate(&workItemConfig, &attributes,
+                                   &context->PldrWorkItem);
+        if (!NT_SUCCESS(status)) {
+            TraceLoggingWrite(g_TtTraceProvider, "PldrWorkItemCreateFailed",
+                              TraceLoggingNTStatus(status, "status"));
+            context->PldrWorkItem = NULL;
+        }
     }
 
     // Replaces /dev/tenstorrent/N: interface instance per device with the
@@ -449,6 +469,38 @@ TtEvtDevicePrepareHardware(
             context->PciDomain = TtQueryPciSegment(Device);
         }
 
+        // pci_set_master parity (enumerate.c:352): ensure Bus Master Enable.
+        // The QEMU rig performed DMA regardless of BME, so the bit was never
+        // load-bearing before silicon.
+        {
+            USHORT command = 0;
+
+            if (busIf.GetBusData(busIf.Context, PCI_WHICHSPACE_CONFIG,
+                                 &command, 0x04,
+                                 sizeof(command)) == sizeof(command) &&
+                command != 0xFFFF && (command & 0x0004) == 0) {
+                command |= 0x0004;
+                busIf.SetBusData(busIf.Context, PCI_WHICHSPACE_CONFIG,
+                                 &command, 0x04, sizeof(command));
+                TraceLoggingWrite(g_TtTraceProvider, "BusMasterEnabled");
+            }
+        }
+
+        // OQ-4/DD-11: pci.sys device-reset interface for RESET_PCIE_LINK.
+        // Absence is tolerated; the reset flavor then fails honestly.
+        RtlZeroMemory(&context->ResetInterface, sizeof(context->ResetInterface));
+        context->ResetInterfaceValid = NT_SUCCESS(
+            WdfFdoQueryForInterface(Device,
+                                    &GUID_DEVICE_RESET_INTERFACE_STANDARD,
+                                    (PINTERFACE)&context->ResetInterface,
+                                    sizeof(context->ResetInterface),
+                                    DEVICE_RESET_INTERFACE_VERSION, NULL));
+        TraceLoggingWrite(g_TtTraceProvider, "ResetInterfaceQueried",
+                          TraceLoggingBoolean(context->ResetInterfaceValid, "valid"),
+                          TraceLoggingUInt32(context->ResetInterfaceValid ?
+                                             context->ResetInterface.SupportedResetTypes : 0,
+                                             "supportedResetTypes"));
+
         TtReadConfigBars(&busIf, barValue);
     }
 
@@ -517,9 +569,55 @@ TtEvtDevicePrepareHardware(
             }
         }
 
+        // DD-8: PIN_PAGES hands raw physical addresses to the iATU, which is
+        // only valid in an identity (untranslated) DMA domain. Probe once: a
+        // common buffer's device-logical address must equal its CPU physical
+        // address, and sit within the engine's 58-bit reach.
+        context->DmaIdentityKnown = FALSE;
+        context->DmaIdentityMapped = FALSE;
+        if (context->DmaEnabler != NULL) {
+            WDFCOMMONBUFFER probe = NULL;
+
+            if (NT_SUCCESS(WdfCommonBufferCreate(context->DmaEnabler,
+                                                 PAGE_SIZE,
+                                                 WDF_NO_OBJECT_ATTRIBUTES,
+                                                 &probe))) {
+                PHYSICAL_ADDRESS logical =
+                    WdfCommonBufferGetAlignedLogicalAddress(probe);
+                PHYSICAL_ADDRESS physical = MmGetPhysicalAddress(
+                    WdfCommonBufferGetAlignedVirtualAddress(probe));
+
+                context->DmaIdentityKnown = TRUE;
+                context->DmaIdentityMapped =
+                    (logical.QuadPart == physical.QuadPart) &&
+                    ((UINT64)logical.QuadPart <= TT_BH_NOC_DMA_LIMIT);
+                TraceLoggingWrite(g_TtTraceProvider, "DmaIdentityProbe",
+                                  TraceLoggingBoolean(context->DmaIdentityMapped, "identity"),
+                                  TraceLoggingUInt64((UINT64)logical.QuadPart, "logical"),
+                                  TraceLoggingUInt64((UINT64)physical.QuadPart, "physical"));
+                WdfObjectDelete(probe);
+            }
+        }
+
+        // Probe-order parity (enumerate.c:370-373): init_hardware, then
+        // pci_save_state + save_reset_state — the snapshot must carry the
+        // MRRS that init just programmed. The PCIe cap offset must be
+        // discovered FIRST: init_hardware's MRRS write needs it (Linux has
+        // pdev->pcie_cap from kernel probe). On the rig ARC was the ttsim
+        // stub; on silicon this is the driver's first real firmware contact.
+        TtDiscoverPcieCap(context);
+        context->NeedsHwInit = !TtBhInitHardware(context);
+        TtPciSaveState(context);
+        TtBhSaveResetState(context);
+        context->HardwareInitDone = TRUE;
+
         // Telemetry probe is non-fatal, like Linux blackhole_init_hardware:
         // a device without telemetry still enumerates (blackhole.c:652-653).
         (VOID)TtBhTelemetryProbe(context);
+
+        // Initial aggregated power state (power_policy parity,
+        // enumerate.c:388-389): no open handles yet -> the idle default.
+        TtPowerAggregate(context);
     }
 
     TraceLoggingWrite(g_TtTraceProvider, "PrepareHardware",
@@ -546,6 +644,19 @@ TtEvtDeviceReleaseHardware(
     RtlZeroMemory(context->BarLength, sizeof(context->BarLength));
     RtlZeroMemory(context->BarBase, sizeof(context->BarBase));
 
+    context->SavedStateValid = FALSE;
+    context->SavedMpsValid = FALSE;
+    context->HardwareInitDone = FALSE;
+    context->DmaIdentityKnown = FALSE;
+    context->DmaIdentityMapped = FALSE;
+
+    if (context->ResetInterfaceValid) {
+        if (context->ResetInterface.InterfaceDereference != NULL) {
+            context->ResetInterface.InterfaceDereference(context->ResetInterface.Context);
+        }
+        context->ResetInterfaceValid = FALSE;
+    }
+
     if (context->BusInterfaceValid) {
         if (context->BusInterface.InterfaceDereference != NULL) {
             context->BusInterface.InterfaceDereference(context->BusInterface.Context);
@@ -554,6 +665,53 @@ TtEvtDeviceReleaseHardware(
     }
 
     TraceLoggingWrite(g_TtTraceProvider, "ReleaseHardware");
+    return STATUS_SUCCESS;
+}
+
+// Suspend/resume parity (enumerate.c:499-522): resume re-runs init_hardware
+// and re-saves config ("Suspend invalidates the saved state"); suspend drops
+// the ASIC to A3 via cleanup_hardware (blackhole.c:702-707). Neither bumps
+// ResetGen — handles survive suspend, like Linux.
+_Use_decl_annotations_
+NTSTATUS
+TtEvtDeviceD0Entry(
+    WDFDEVICE Device,
+    WDF_POWER_DEVICE_STATE PreviousState
+    )
+{
+    PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
+
+    // Initial start does its init in PrepareHardware (which runs first and
+    // sets HardwareInitDone); only a return from a low-power state
+    // re-initializes here.
+    if (context->IsBlackhole && context->HardwareInitDone &&
+        PreviousState != WdfPowerDeviceD3Final) {
+        (VOID)TtBhInitHardware(context);
+        TtPciSaveState(context);
+    }
+    return STATUS_SUCCESS;
+}
+
+_Use_decl_annotations_
+NTSTATUS
+TtEvtDeviceD0Exit(
+    WDFDEVICE Device,
+    WDF_POWER_DEVICE_STATE TargetState
+    )
+{
+    PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
+
+    // blackhole_cleanup_hardware (blackhole.c:702-707): ASIC_STATE3 on the
+    // way down, skipped when detached (surprise removal — the send would
+    // just time out against a missing device anyway).
+    if (context->IsBlackhole && !context->Detached &&
+        TargetState != WdfPowerDeviceD0) {
+        TT_ARC_MSG msg;
+
+        RtlZeroMemory(&msg, sizeof(msg));
+        msg.Header = TT_ARC_MSG_TYPE_ASIC_STATE3;
+        (VOID)TtBhSendArcMessage(context, &msg);
+    }
     return STATUS_SUCCESS;
 }
 

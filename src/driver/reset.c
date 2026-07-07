@@ -75,6 +75,22 @@ TtCfgReadWord(PTT_DEVICE_CONTEXT Context, ULONG Offset, USHORT *Value)
                                             Offset, sizeof(*Value)) == sizeof(*Value);
 }
 
+static BOOLEAN
+TtCfgReadDword(
+    _In_ PTT_DEVICE_CONTEXT Context,
+    _In_ ULONG Offset,
+    _Out_ UINT32 *Value
+    )
+{
+    *Value = 0xFFFFFFFF;
+    if (!Context->BusInterfaceValid) {
+        return FALSE;
+    }
+    return Context->BusInterface.GetBusData(Context->BusInterface.Context,
+                                            PCI_WHICHSPACE_CONFIG, Value,
+                                            Offset, sizeof(*Value)) == sizeof(*Value);
+}
+
 _Use_decl_annotations_
 VOID
 TtCfgWriteWord(PTT_DEVICE_CONTEXT Context, ULONG Offset, USHORT Value)
@@ -140,18 +156,205 @@ TtPcieTimerInterrupt(
     return TRUE;
 }
 
-// safe_pci_restore_state (pcie.c:43-59): on the ttsim rig the fake reset
-// preserves BARs, so this reduces to a device-present check (vendor ID
-// readback). Full config save/restore is OQ-5.
+// Locate the PCI Express capability (ID 0x10) and cache its offset. The walk
+// is bounded (48 steps covers the 256-byte legacy space) for the same reason
+// Linux bounds its cap iteration: misbehaving hardware returns all-ones.
+// Split from TtPciSaveState so PrepareHardware can discover the offset BEFORE
+// the first TtBhInitHardware — whose MRRS write needs it (Linux uses the
+// kernel-discovered pdev->pcie_cap, present from probe).
+_Use_decl_annotations_
+VOID
+TtDiscoverPcieCap(
+    PTT_DEVICE_CONTEXT Context
+    )
+{
+    USHORT statusReg = 0;
+    UINT32 capPtrDword = 0;
+    ULONG offset, steps;
+
+    Context->PcieCapOffset = 0;
+    if (!Context->BusInterfaceValid) {
+        return;
+    }
+    if (!TtCfgReadWord(Context, 0x06, &statusReg) || statusReg == 0xFFFF ||
+        (statusReg & 0x0010) == 0) {
+        return;   // no capabilities list
+    }
+    if (!TtCfgReadDword(Context, 0x34, &capPtrDword)) {
+        return;
+    }
+    offset = capPtrDword & 0xFC;
+    for (steps = 0; steps < 48 && offset >= 0x40; steps++) {
+        USHORT capHeader;
+
+        if (!TtCfgReadWord(Context, offset, &capHeader) || capHeader == 0xFFFF) {
+            break;
+        }
+        if ((capHeader & 0xFF) == 0x10) {   // PCI_CAP_ID_EXP
+            Context->PcieCapOffset = offset;
+            break;
+        }
+        offset = ((ULONG)capHeader >> 8) & 0xFC;
+    }
+}
+
+// pci_save_state parity (enumerate.c:372, pcie.c:57): snapshot the standard
+// header dwords plus the PCIe capability's Device/Link Control. MSI state is
+// deliberately skipped — the driver owns no WdfInterrupt (Blackhole is
+// polling-only) and MSI config belongs to pci.sys. Called at PrepareHardware
+// (after init_hardware, so the snapshot carries MRRS=4096), on resume, and to
+// re-save after each successful restore. Resolves OQ-5 item 2 (DD-12).
+_Use_decl_annotations_
+VOID
+TtPciSaveState(
+    PTT_DEVICE_CONTEXT Context
+    )
+{
+    ULONG i;
+
+    Context->SavedStateValid = FALSE;
+
+    if (!Context->BusInterfaceValid) {
+        return;
+    }
+
+    for (i = 0; i < ARRAYSIZE(Context->SavedHeaderDword); i++) {
+        if (!TtCfgReadDword(Context, i * 4, &Context->SavedHeaderDword[i])) {
+            return;
+        }
+    }
+
+    TtDiscoverPcieCap(Context);
+
+    if (Context->PcieCapOffset != 0) {
+        if (!TtCfgReadWord(Context, Context->PcieCapOffset + 0x08,
+                           &Context->SavedPcieDevCtl) ||
+            !TtCfgReadWord(Context, Context->PcieCapOffset + 0x10,
+                           &Context->SavedPcieLnkCtl)) {
+            return;
+        }
+    }
+
+    Context->SavedStateValid = TRUE;
+    TraceLoggingWrite(g_TtTraceProvider, "PciStateSaved",
+                      TraceLoggingUInt32(Context->PcieCapOffset, "pcieCapOffset"),
+                      TraceLoggingUInt16(Context->SavedPcieDevCtl, "pcieDevCtl"));
+}
+
+// safe_pci_restore_state (pcie.c:43-59): test-read the vendor ID first and
+// never write a wedged link (pcie.c:52-54); require a snapshot (pcie.c:46-47);
+// then rewrite the writable header state — BARs and PCIe control first,
+// Command LAST so Memory-Space/Bus-Master re-enable only lands once the BARs
+// decode again — and re-save like Linux. Resolves OQ-5 item 2 (DD-12).
 static BOOLEAN
 TtSafeRestoreState(
     _In_ PTT_DEVICE_CONTEXT Context
     )
 {
     USHORT vendor;
+    ULONG off;
 
-    return TtCfgReadWord(Context, 0x00, &vendor) &&
-           vendor == TT_PCI_VENDOR_ID;
+    if (!TtCfgReadWord(Context, 0x00, &vendor) || vendor != TT_PCI_VENDOR_ID) {
+        return FALSE;
+    }
+    if (!Context->SavedStateValid) {
+        return FALSE;
+    }
+
+    for (off = 0x10; off <= 0x24; off += 4) {   // BAR0-5
+        TtCfgWriteDword(Context, off, Context->SavedHeaderDword[off / 4]);
+    }
+    TtCfgWriteDword(Context, 0x30, Context->SavedHeaderDword[0x30 / 4]);
+    TtCfgWriteDword(Context, 0x0C, Context->SavedHeaderDword[0x0C / 4]);
+    TtCfgWriteWord(Context, 0x3C, (USHORT)Context->SavedHeaderDword[0x3C / 4]);
+    if (Context->PcieCapOffset != 0) {
+        TtCfgWriteWord(Context, Context->PcieCapOffset + 0x08,
+                       Context->SavedPcieDevCtl);
+        TtCfgWriteWord(Context, Context->PcieCapOffset + 0x10,
+                       Context->SavedPcieLnkCtl);
+    }
+    TtCfgWriteWord(Context, TT_PCI_COMMAND,
+                   (USHORT)Context->SavedHeaderDword[TT_PCI_COMMAND / 4]);
+
+    TtPciSaveState(Context);
+    return TRUE;
+}
+
+// RESET_PCIE_LINK via the pci.sys reset interface (OQ-4 -> DD-11). Returns
+// TRUE only when PlatformLevelDeviceReset is supported and the work item was
+// queued; FALSE is an honest "this driver cannot reset the link". FLR is
+// deliberately NOT used as a fallback: Linux never validated FLR on this ASIC
+// (tt-kmd has no pcie_flr call) and an FLR that resets only the PCIe function
+// while leaving the NOC/ASIC state would be a success-shaped lie.
+static BOOLEAN
+TtPldrInitiate(
+    _In_ PTT_DEVICE_CONTEXT Context
+    )
+{
+    if (!Context->ResetInterfaceValid ||
+        Context->ResetInterface.DeviceReset == NULL ||
+        (Context->ResetInterface.SupportedResetTypes &
+         (1u << PlatformLevelDeviceReset)) == 0 ||
+        Context->PldrWorkItem == NULL) {
+        TraceLoggingWrite(g_TtTraceProvider, "PldrUnsupported",
+                          TraceLoggingBoolean(Context->ResetInterfaceValid, "interfaceValid"),
+                          TraceLoggingUInt32(Context->ResetInterfaceValid ?
+                                             Context->ResetInterface.SupportedResetTypes : 0,
+                                             "supportedResetTypes"));
+        return FALSE;
+    }
+    if (InterlockedExchange(&Context->PldrQueued, 1) != 0) {
+        return TRUE;   // a reset is already in flight
+    }
+
+    // The work item can outlive ReleaseHardware's dereference of
+    // ResetInterface (WDF flushes device work items at object cleanup, AFTER
+    // ReleaseHardware) — so it owns a snapshot holding its own extra
+    // reference, taken here while the interface is guaranteed live (this
+    // ioctl blocks removal).
+    Context->PldrSnapshot = Context->ResetInterface;
+    if (Context->PldrSnapshot.InterfaceReference != NULL) {
+        Context->PldrSnapshot.InterfaceReference(Context->PldrSnapshot.Context);
+    }
+
+    WdfWorkItemEnqueue(Context->PldrWorkItem);
+    return TRUE;
+}
+
+// Work-item body: invoke PLDR outside the ioctl path. PLDR surprise-removes
+// and re-enumerates this device stack, so it must not run while the reset
+// ioctl (or its ERESOURCE) is outstanding; success is observed by the caller
+// as interface departure + arrival, not by this ioctl's result. Windows delta
+// vs Linux (DD-11): pre-reset handles do not survive RESET_PCIE_LINK.
+_Use_decl_annotations_
+VOID
+TtPldrWorkItem(
+    WDFWORKITEM WorkItem
+    )
+{
+    PTT_DEVICE_CONTEXT context =
+        TtGetDeviceContext(WdfWorkItemGetParentObject(WorkItem));
+    // Local copy of the enqueue-time snapshot: never the live ResetInterface,
+    // which ReleaseHardware dereferences/invalidates concurrently during the
+    // PLDR-triggered removal.
+    DEVICE_RESET_INTERFACE_STANDARD snapshot = context->PldrSnapshot;
+    NTSTATUS status;
+
+    status = snapshot.DeviceReset(snapshot.Context,
+                                  PlatformLevelDeviceReset, 0, NULL);
+    TraceLoggingWrite(g_TtTraceProvider, "PldrInvoked",
+                      TraceLoggingNTStatus(status, "status"));
+
+    // Drop the snapshot's extra reference (the device context memory itself
+    // stays valid here: WDF holds it until work-item rundown at cleanup).
+    if (snapshot.InterfaceDereference != NULL) {
+        snapshot.InterfaceDereference(snapshot.Context);
+    }
+    if (!NT_SUCCESS(status)) {
+        // Allow a retry only if the platform refused; on success the stack
+        // is torn down and the context dies with it.
+        InterlockedExchange(&context->PldrQueued, 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,16 +471,20 @@ TtIoctlResetDevice(
     case TENSTORRENT_RESET_DEVICE_RESTORE_STATE:   // 0 (legacy)
         ok = TtSafeRestoreState(Context);
         if (ok && Context->IsBlackhole) {
+            TtBhRestoreResetState(Context);   // MPS (chardev.c:242)
             ok = TtBhInitHardware(Context);
         }
         break;
 
     case TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK: // 1 (legacy)
-        // Secondary-bus reset touches the upstream bridge — not expressible
-        // from a KMDF function driver (DD-9). Zap mappings and report the
-        // device-present state; no gen bump (Linux keeps fds valid).
+        // pcie_hot_reset_and_restore_state parity via PLDR (DD-11): pci.sys
+        // performs the platform-level reset; this stack is surprise-removed
+        // and re-enumerated, so the reset fires from a work item after this
+        // ioctl completes and re-init happens in the fresh PrepareHardware.
+        // No gen bump (Linux keeps fds valid; here the stack teardown itself
+        // invalidates every handle — DD-11 documents the delta).
         TtResetZapMappings(Context);
-        ok = TtSafeRestoreState(Context);
+        ok = TtPldrInitiate(Context);
         break;
 
     case TENSTORRENT_RESET_DEVICE_CONFIG_WRITE:    // 2 (legacy)
@@ -307,9 +514,14 @@ TtIoctlResetDevice(
         if (Context->NeedsHwInit) {
             Context->NeedsHwInit = FALSE;   // cleared unconditionally
             if (ok && TtSafeRestoreState(Context)) {
-                ok = Context->IsBlackhole ? TtBhInitHardware(Context) : TRUE;
-                if (ok && Context->IsBlackhole) {
-                    (VOID)TtBhTelemetryProbe(Context);
+                if (Context->IsBlackhole) {
+                    TtBhRestoreResetState(Context);   // MPS (chardev.c:277)
+                    ok = TtBhInitHardware(Context);
+                    if (ok) {
+                        (VOID)TtBhTelemetryProbe(Context);
+                    }
+                } else {
+                    ok = TRUE;
                 }
             } else {
                 ok = FALSE;

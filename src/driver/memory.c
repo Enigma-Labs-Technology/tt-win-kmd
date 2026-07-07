@@ -439,6 +439,15 @@ TtIoctlAllocateDmaBuf(
     RtlZeroMemory(WdfCommonBufferGetAlignedVirtualAddress(buffer),
                   in.requested_size);
 
+    // dma_set_coherent_mask(58) parity (enumerate.c:331, dma_address_bits):
+    // the Blackhole DMA engine cannot generate addresses above 2^58, and the
+    // WDF enabler profile is 64-bit — enforce the reach here rather than
+    // silently handing out an unreachable iATU target.
+    if ((UINT64)logical.QuadPart + in.requested_size - 1 > TT_BH_NOC_DMA_LIMIT) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto fail;
+    }
+
     if (in.flags & TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA) {
         // DMA-buffer NOC mappings are always top-down (memory.c:477).
         status = TtSetupNocDma(Context, FileObject, TRUE, in.requested_size,
@@ -838,6 +847,16 @@ TtIoctlPinPages(
     }
     if (in.flags & TENSTORRENT_PIN_PAGES_READ_ONLY) {
         // Enforceable only via IOMMU translation (-EOPNOTSUPP parity, DD-8).
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    // DD-8: this is the Linux no-IOMMU direct path (memory.c:685-705) — it
+    // returns raw physical addresses as device addresses. In a translated
+    // (non-identity) DMA domain those are not bus addresses; the device
+    // would fault through the IOMMU or silently corrupt whatever the value
+    // aliases. Refuse honestly, per the documented DD-8 contract. The domain
+    // was probed at PrepareHardware (DmaIdentityProbe).
+    if (!Context->DmaIdentityKnown || !Context->DmaIdentityMapped) {
         return STATUS_NOT_SUPPORTED;
     }
 

@@ -94,14 +94,21 @@ TtPowerAggregate(
                       TraceLoggingUInt16(aggFlags, "flags"),
                       TraceLoggingUInt8(maxSettingsCount, "maxSettings"));
 
-    // Send to firmware (blackhole set_power_state -> ARC POWER_SETTING 0x21).
-    // The message payload carries the aggregate; ttsim consumes it as a no-op.
+    // Send to firmware (blackhole_set_power_state -> ARC POWER_SETTING 0x21).
+    // On-wire layout per blackhole.c:802-804 + chardev.c:531: the HEADER packs
+    // type | validity<<8 | flags<<16, and the payload carries ALL 14 settings,
+    // two u16 per dword. ttsim consumed any layout as a no-op, which hid an
+    // earlier mis-pack (validity/flags in payload[0], 12 settings dropped) —
+    // real firmware parses these fields.
     if (Context->IsBlackhole && !Context->Detached) {
         RtlZeroMemory(&msg, sizeof(msg));
-        msg.Header = TT_ARC_MSG_TYPE_POWER_SETTING;   // 0x21
-        msg.Payload[0] = (UINT32)aggFlags |
-                         ((UINT32)TT_POWER_VALIDITY(15, maxSettingsCount) << 16);
-        msg.Payload[1] = ((UINT32)aggSettings[0]) | ((UINT32)aggSettings[1] << 16);
+        msg.Header = TT_ARC_MSG_TYPE_POWER_SETTING |
+                     ((UINT32)TT_POWER_VALIDITY(15, maxSettingsCount) << 8) |
+                     ((UINT32)aggFlags << 16);
+        for (i = 0; i < ARRAYSIZE(aggSettings) / 2; i++) {
+            msg.Payload[i] = (UINT32)aggSettings[2 * i] |
+                             ((UINT32)aggSettings[2 * i + 1] << 16);
+        }
         (VOID)TtBhSendArcMessage(Context, &msg);
     }
 }

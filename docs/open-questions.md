@@ -84,25 +84,28 @@ window 201 and maps `tlb_regs` (blackhole.c:587-588). M2 therefore requires
 kernel-TLB window programming (config registers at BAR0+0x1FC00000) as its
 first driver deliverable, before any msgqueue traffic.
 
-## OQ-5: Silicon reset refinements deferred from M4
+## OQ-5: Silicon reset refinements deferred from M4 — IMPLEMENTED (M7), silicon verification pending
 
-Two reset mechanisms are stubbed for the ttsim rig and must be completed for
-real p150a bring-up (isolated so they are single-function swaps):
+Two reset mechanisms were stubbed for the ttsim rig. Both are now implemented
+(2026-07-07, first-silicon bring-up):
 
-1. **Secondary-bus reset (RESET_PCIE_LINK).** A KMDF function driver cannot touch
-   the upstream bridge's config space (pcie.c:61-90 assert/deassert SBR). On the
-   rig this flavor zaps mappings and returns device-present; on silicon it must
-   request a bus/PLDR reset via `GUID_DEVICE_RESET_INTERFACE_STANDARD`
-   (`DeviceReset`). Isolated in `TtIoctlResetDevice` case
-   TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK.
+1. **Secondary-bus reset (RESET_PCIE_LINK) — implemented as PLDR.** The flavor
+   now requests `PlatformLevelDeviceReset` through
+   `GUID_DEVICE_RESET_INTERFACE_STANDARD`, fired from a work item because PLDR
+   surprise-removes this device stack; unsupported platforms get an honest
+   `result=1`. FLR is deliberately not used (never validated on this ASIC).
+   Full rationale and the fds-do-not-survive delta: DD-11.
 
-2. **Config save/restore + Max-Payload-Size.** `safe_pci_restore_state` currently
-   reduces to a vendor-ID present check (the rig's fake reset preserves BARs).
-   Silicon needs the pci_save_state/restore snapshot (via BUS_INTERFACE_STANDARD
-   Get/SetBusData at PrepareHardware / after reset) and the DBI-view MPS
-   snapshot (wormhole.c:968-988 / blackhole.c:304-330). Isolated in
-   `TtSafeRestoreState` (reset.c) and the (currently absent) save_reset_state
-   hook.
+2. **Config save/restore + Max-Payload-Size — implemented.**
+   `TtPciSaveState`/`TtSafeRestoreState` (reset.c) now perform the real
+   pci_save_state/restore via BUS_INTERFACE_STANDARD (snapshot at
+   PrepareHardware after init_hardware; ordered restore, Command last, vendor
+   test-read guard), and `TtBhSaveResetState`/`TtBhRestoreResetState`
+   (blackhole.c) snapshot/restore the DBI-view MPS (blackhole.c:304-330
+   parity). Wired into RESTORE_STATE and POST_RESET. Details: DD-12.
 
-Neither affects the M4-tested behaviors (fd invalidation, mapping zap,
-reset-window semantics, no-crash under storm/hotplug).
+**Remaining to close:** verification on real p150a silicon — MPS survives
+ASIC_RESET→POST_RESET, BARs decode after restore, PLDR re-enumeration
+round-trip — per the real-silicon test ladder (rungs f-i). Neither change
+affects the M4-tested rig behaviors (fd invalidation, mapping zap,
+reset-window semantics).

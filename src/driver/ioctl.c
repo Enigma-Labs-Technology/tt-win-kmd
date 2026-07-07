@@ -243,8 +243,12 @@ TtCheckIoGates(
     if (Context->NeedsHwInit && Nr != MAXUINT32 &&
         Nr != 0 && Nr != 5 && Nr != 6) {
         // Post-reset window: only GET_DEVICE_INFO, GET_DRIVER_INFO,
-        // RESET_DEVICE are allowed (chardev.c:616-624).
-        return STATUS_DEVICE_REMOVED;                 // -ENODEV
+        // RESET_DEVICE are allowed (chardev.c:616-624). QUERY_TELEMETRY maps
+        // Linux's -ENODATA distinction (telemetry.c:23-24) to NOT_READY so a
+        // telemetry poller sees a transient, not device-gone (porting note,
+        // analysis §10:369).
+        return (Nr == 0x102u) ? STATUS_DEVICE_NOT_READY
+                              : STATUS_DEVICE_REMOVED; // -ENODATA / -ENODEV
     }
     return STATUS_SUCCESS;
 }

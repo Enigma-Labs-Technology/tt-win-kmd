@@ -198,11 +198,13 @@ upstream bridge, which a KMDF function driver cannot do; it maps to the PCI rese
 interface where available and is otherwise a documented rig no-op (zap still
 runs). BH ASIC_DMC_RESET uses the ARC TRIGGER_RESET message (M2 msgqueue).
 
-**Config save/restore + MPS (deferred, OQ-5).** Full pci_save_state/restore and
-the DBI Max-Payload-Size snapshot are real-hardware refinements; on the ttsim rig
-the fake reset preserves BARs, so `safe_pci_restore_state` reduces to a
-device-present check (vendor ID readback). init_hardware re-run sends ASIC_STATE0
-+ SET_WDT_TIMEOUT and re-probes telemetry (blackhole.c:620-639 parity).
+**Config save/restore + MPS (was deferred as OQ-5 — now implemented, see
+DD-12).** On the ttsim rig the fake reset preserved BARs, so
+`safe_pci_restore_state` was a device-present check; for silicon it is the real
+pci_save_state/restore plus the DBI Max-Payload-Size snapshot (DD-12).
+init_hardware re-run sets MRRS then sends ASIC_STATE0 + SET_WDT_TIMEOUT and
+re-probes telemetry (blackhole.c:620-639 parity). RESET_PCIE_LINK is now a real
+PLDR (DD-11), no longer a rig no-op.
 
 **Surprise removal.** EvtDeviceSurpriseRemoval sets `Detached` and zaps mappings;
 the gate then returns STATUS_DEVICE_REMOVED for everything. iATU teardown already
@@ -248,3 +250,84 @@ tags 14-16, tt_heartbeat 32, tt_therm_trip_count 60, tt_asic_id u64 61:62,
 tt_serial u64 1:2, tt_fw_bundle_ver 28). The exact Linux names are documented per
 field in the header. The BH/WH hwmon label difference (asic_temp vs asic1_temp)
 is a naming-only concern deferred until a WH device exists.
+
+## DD-11: RESET_PCIE_LINK via PlatformLevelDeviceReset (M7, resolves OQ-5 item 1)
+
+**Decision.** `TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK` now performs a real
+reset through the pci.sys device-reset interface
+(`GUID_DEVICE_RESET_INTERFACE_STANDARD`, queried at PrepareHardware with
+`WdfFdoQueryForInterface`, version 1). Only `PlatformLevelDeviceReset` is used —
+the platform analog of the Linux upstream-bridge secondary-bus reset
+(`pcie_hot_reset_and_restore_state`, pcie.c:61-90). If the platform does not
+support PLDR for this device (`SupportedResetTypes` bit clear) the flavor
+returns `out.result=1`: an honest failure, never the old present-check.
+
+**FLR is deliberately not a fallback.** Linux never validated FLR on this ASIC
+(tt-kmd contains no `pcie_flr`); an FLR that resets the PCIe function but not
+the NOC/ASIC would be a success-shaped lie.
+
+**Execution model.** PLDR surprise-removes and re-enumerates this device stack.
+The reset therefore fires from a WDF work item after the ioctl completes
+(`TtPldrWorkItem`, guarded by a `PldrQueued` interlock): invoking it inline
+could deadlock the removal against the in-flight ioctl. `out.result=0` means
+"reset initiated"; success is observed as device-interface departure and
+re-arrival, after which a fresh PrepareHardware re-runs the full init.
+
+**Semantic delta vs Linux (accepted).** On Linux, RESET_PCIE_LINK keeps fds
+valid (chardev.c:247-249, no gen bump). On Windows the stack teardown
+invalidates every handle. The reference tooling reopens by BDF/interface after
+a link reset (analysis §11), so this is compatible in practice; it is a
+documented divergence, not an accident.
+
+## DD-12: Silicon-truth fixes — config restore, MPS/MRRS, ARC message content (M7, resolves OQ-5 item 2)
+
+Everything in this DD was masked by the ttsim rig (fake reset preserved BARs;
+the ARC stub accepted any message and answered header 0 instantly; QEMU DMA'd
+regardless of BME or IOMMU state).
+
+- **Config snapshot/restore (pci_save_state parity).** `TtPciSaveState`
+  (reset.c) snapshots the 16 standard-header dwords plus PCIe-cap
+  DevCtl/LnkCtl at PrepareHardware — after init_hardware, so the snapshot
+  carries MRRS (enumerate.c:370-372 ordering) — and on resume/after restore.
+  `TtSafeRestoreState` now performs the real ordered restore: vendor-ID test
+  read first (never write a wedged link, pcie.c:52-54), then BARs → ROM →
+  cacheline → int-line → PCIe DevCtl/LnkCtl → **Command last** (Memory-Space /
+  Bus-Master re-enable only after BARs decode). MSI state is skipped by
+  design: the driver owns no interrupt objects (Blackhole is polling-only) and
+  MSI config belongs to pci.sys.
+- **DBI MPS snapshot (blackhole_save/restore_reset_state, blackhole.c:304-330).**
+  `TtBhSaveResetState`/`TtBhRestoreResetState` read/RMW the chip's own
+  config-space view (outbound NOC TLB 62 at 0xF8...0 + 0x78) to preserve the
+  negotiated Max Payload Size across chip resets; wired into RESTORE_STATE and
+  POST_RESET between config restore and init_hardware (chardev.c:242,277).
+- **MRRS.** `TtBhInitHardware` now sets PCIe DevCtl MRRS to 4096 (encoding 5)
+  first, matching `pcie_set_readrq(pdev, MAX_MRRS)` (blackhole.c:626).
+- **ARC watchdog.** SET_WDT_TIMEOUT payload is now `1000 * 10` ms, matching
+  the Linux `auto_reset_timeout` default (module.c:48, blackhole.c:634). The
+  old payload of 0 disarmed (or worse, zero-perioded) the ARC watchdog.
+- **POWER_SETTING wire format.** Header now packs
+  `type | validity<<8 | flags<<16` with all 14 settings in payload[0..6]
+  (blackhole.c:802-804, chardev.c:531). The previous layout put validity/flags
+  in payload[0] and dropped 12 settings — real firmware parses these fields on
+  every open/close.
+- **init_hardware at probe + initial power state.** PrepareHardware now runs
+  `TtBhInitHardware` (ASIC_STATE0 + WDT) and the initial power aggregation,
+  matching enumerate.c:370,388. Previously the ASIC was never brought to A0
+  until the first reset ioctl.
+- **ASIC_STATE3 on power-down.** New D0Exit callback sends A3
+  (cleanup_hardware parity, blackhole.c:702-707), skipped when Detached;
+  D0Entry re-runs init_hardware + re-saves config on resume
+  (enumerate.c:499-522). Neither path bumps ResetGen — handles survive
+  suspend, like Linux.
+- **Bus Master Enable.** PrepareHardware verifies/sets Command bit 2
+  (pci_set_master parity, enumerate.c:352).
+- **PIN_PAGES identity-domain guard.** PrepareHardware probes whether the DMA
+  domain is identity-mapped (common-buffer logical address == CPU physical,
+  within the 58-bit engine reach). In a translated domain PIN_PAGES returns
+  STATUS_NOT_SUPPORTED — enforcing what DD-8 documented but never checked;
+  raw PFNs must never be handed to the iATU under translation.
+- **58-bit reach.** ALLOCATE_DMA_BUF rejects common buffers whose logical
+  address exceeds 2^58-1 (`dma_set_coherent_mask(58)` parity).
+- **Telemetry post-reset gate.** In the needs_hw_init window QUERY_TELEMETRY
+  returns STATUS_DEVICE_NOT_READY (Linux -ENODATA, telemetry.c:23-24) instead
+  of DEVICE_REMOVED, so pollers see a transient (analysis §10 porting note).

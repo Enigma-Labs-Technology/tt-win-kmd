@@ -230,6 +230,88 @@ TtBhNocWrite(
     TtBhNocWrite32(Context, X, Y, Addr, Data, Noc);
 }
 
+// PCIe DBI backdoor + Device Control fields (tt-kmd/blackhole.c:44-51,
+// pcie_regs): the chip's own config space viewed through the FW-configured
+// outbound NOC TLB 62 at a fixed NOC address. The host config snapshot cannot
+// recover the DBI-view MPS after a chip reset, hence this side channel.
+#define TT_BH_NOC_ID_OFFSET 0x4044u
+#define TT_BH_PCIE_DBI_ADDR 0xF800000000000000ull
+#define TT_BH_DBI_DEVCTL_DEVSTA 0x78u
+#define TT_PCI_EXP_DEVCTL_PAYLOAD 0x00E0u   // MPS field, bits 7:5
+#define TT_PCI_EXP_DEVCTL_PAYLOAD_SHIFT 5
+#define TT_PCI_EXP_DEVCTL_READRQ 0x7000u    // MRRS field, bits 14:12
+#define TT_PCI_EXP_DEVCTL_READRQ_SHIFT 12
+#define TT_BH_MAX_MRRS_ENCODING 5u          // 4096 bytes (MAX_MRRS, blackhole.c:18)
+#define TT_AUTO_RESET_TIMEOUT_S 10u         // auto_reset_timeout default (module.c:48)
+
+// blackhole_detect_pcie_noc_x (blackhole.c:298-302): BH has two PCIE
+// instances; the NOC ID register in NOC2AXI config space names the live one.
+static BOOLEAN
+TtBhDetectPcieNocX(
+    _In_ struct _TT_DEVICE_CONTEXT *Context,
+    _Out_ UINT32 *NocX
+    )
+{
+    *NocX = READ_REGISTER_ULONG(
+                (volatile ULONG *)(Context->Noc2AxiCfg + TT_BH_NOC_ID_OFFSET)) & 0x3F;
+    return (*NocX == 2 || *NocX == 11);
+}
+
+// blackhole_save_reset_state (blackhole.c:304-315): snapshot the DBI-view
+// Max Payload Size. Resolves OQ-5 item 2 with reset.c's TtPciSaveState.
+_Use_decl_annotations_
+VOID
+TtBhSaveResetState(
+    struct _TT_DEVICE_CONTEXT *Context
+    )
+{
+    UINT32 x, deviceControl;
+
+    Context->SavedMpsValid = FALSE;
+    if (Context->Noc2AxiCfg == NULL || !TtBhDetectPcieNocX(Context, &x)) {
+        return;
+    }
+    deviceControl = TtBhNocRead32(Context, x, 0,
+                                  TT_BH_PCIE_DBI_ADDR + TT_BH_DBI_DEVCTL_DEVSTA, 0);
+    if (deviceControl == MAXUINT32) {
+        return;   // NOC hung / window dead — keep the snapshot invalid
+    }
+    Context->SavedMps = (UINT8)((deviceControl & TT_PCI_EXP_DEVCTL_PAYLOAD) >>
+                                TT_PCI_EXP_DEVCTL_PAYLOAD_SHIFT);
+    Context->SavedMpsValid = TRUE;
+    TraceLoggingWrite(g_TtTraceProvider, "BhSavedMps",
+                      TraceLoggingUInt8(Context->SavedMps, "mps"));
+}
+
+// blackhole_restore_reset_state (blackhole.c:317-330): RMW the DBI-view MPS
+// back to the negotiated value. A chip reset leaves a power-on default that
+// can exceed the link-negotiated MPS — oversized TLPs on the first large DMA.
+_Use_decl_annotations_
+VOID
+TtBhRestoreResetState(
+    struct _TT_DEVICE_CONTEXT *Context
+    )
+{
+    UINT32 x, deviceControl;
+
+    if (!Context->SavedMpsValid || Context->Noc2AxiCfg == NULL ||
+        !TtBhDetectPcieNocX(Context, &x)) {
+        return;
+    }
+    deviceControl = TtBhNocRead32(Context, x, 0,
+                                  TT_BH_PCIE_DBI_ADDR + TT_BH_DBI_DEVCTL_DEVSTA, 0);
+    if (deviceControl == MAXUINT32) {
+        return;
+    }
+    deviceControl &= ~TT_PCI_EXP_DEVCTL_PAYLOAD;
+    deviceControl |= ((UINT32)Context->SavedMps << TT_PCI_EXP_DEVCTL_PAYLOAD_SHIFT) &
+                     TT_PCI_EXP_DEVCTL_PAYLOAD;
+    TtBhNocWrite32(Context, x, 0,
+                   TT_BH_PCIE_DBI_ADDR + TT_BH_DBI_DEVCTL_DEVSTA, deviceControl, 0);
+    TraceLoggingWrite(g_TtTraceProvider, "BhRestoredMps",
+                      TraceLoggingUInt8(Context->SavedMps, "mps"));
+}
+
 // Maps to is_range_within_csm (telemetry.h:75-78) + csm_read32/csm_write32
 // (blackhole.c:270-286). Returns FALSE on range violation (-EINVAL parity).
 static BOOLEAN
@@ -611,13 +693,31 @@ TtBhInitHardware(
 {
     TT_ARC_MSG msg;
 
+    // pcie_set_readrq(pdev, MAX_MRRS=4096) (blackhole.c:626): RMW the PCIe
+    // capability Device Control MRRS field. PcieCapOffset comes from
+    // TtPciSaveState; 0 means no PCIe capability (soft device) — skip.
+    if (Context->PcieCapOffset != 0) {
+        USHORT devCtl;
+
+        if (TtCfgReadWord(Context, Context->PcieCapOffset + 0x08, &devCtl) &&
+            devCtl != 0xFFFF) {
+            devCtl = (USHORT)((devCtl & ~TT_PCI_EXP_DEVCTL_READRQ) |
+                              (TT_BH_MAX_MRRS_ENCODING <<
+                               TT_PCI_EXP_DEVCTL_READRQ_SHIFT));
+            TtCfgWriteWord(Context, Context->PcieCapOffset + 0x08, devCtl);
+        }
+    }
+
     RtlZeroMemory(&msg, sizeof(msg));
     msg.Header = TT_ARC_MSG_TYPE_ASIC_STATE0;   // 0xA0
     (VOID)TtBhSendArcMessage(Context, &msg);
 
     RtlZeroMemory(&msg, sizeof(msg));
     msg.Header = TT_ARC_MSG_TYPE_SET_WDT_TIMEOUT;   // 0xC1
-    msg.Payload[0] = 0;   // auto_reset_timeout disabled by default (module.c)
+    // 1000 * auto_reset_timeout ms, Linux default 10 s (module.c:48,
+    // blackhole.c:634) — arms the ARC/DMC auto-recovery watchdog. The old
+    // payload of 0 came from misreading the module default.
+    msg.Payload[0] = 1000u * TT_AUTO_RESET_TIMEOUT_S;
     (VOID)TtBhSendArcMessage(Context, &msg);
 
     TraceLoggingWrite(g_TtTraceProvider, "BhInitHardware");

@@ -53,3 +53,5 @@ NTSTATUS TtBhReadTelemetryTag(_In_ struct _TT_DEVICE_CONTEXT *Context,
                               _In_ UINT16 TagId, _Out_ UINT32 *Value);
 BOOLEAN TtBhSendArcMessage(_In_ struct _TT_DEVICE_CONTEXT *Context,
                            _Inout_ PTT_ARC_MSG Msg);
+VOID TtBhSaveResetState(_Inout_ struct _TT_DEVICE_CONTEXT *Context);
+VOID TtBhRestoreResetState(_In_ struct _TT_DEVICE_CONTEXT *Context);

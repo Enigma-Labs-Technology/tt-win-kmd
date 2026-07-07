@@ -87,7 +87,39 @@ typedef struct _TT_DEVICE_CONTEXT {
     // referenced across PrepareHardware..ReleaseHardware.
     BUS_INTERFACE_STANDARD BusInterface;
     BOOLEAN BusInterfaceValid;
-    ULONG SavedConfigPresent;
+
+    // OQ-5/DD-12: PCI config snapshot for restore after chip-internal resets
+    // (pci_save_state parity, enumerate.c:372 + pcie.c:43-59). Header dwords
+    // indexed by dword number; only the writable subset is restored. SavedMps
+    // is the DBI-view Max Payload Size field (blackhole.c:304-330) — the chip
+    // reset wipes it and the host snapshot cannot recover it.
+    UINT32 SavedHeaderDword[16];
+    USHORT SavedPcieDevCtl;
+    USHORT SavedPcieLnkCtl;
+    ULONG PcieCapOffset;          // 0 = PCIe capability not found
+    UINT8 SavedMps;
+    BOOLEAN SavedMpsValid;
+    BOOLEAN SavedStateValid;
+    BOOLEAN HardwareInitDone;     // probe-time init ran; D0Entry uses this to
+                                  // distinguish resume from initial start
+
+    // OQ-4/DD-11: pci.sys device-reset interface for RESET_PCIE_LINK (PLDR).
+    // The reset fires from a work item after the ioctl completes, because
+    // PLDR surprise-removes this very device stack.
+    DEVICE_RESET_INTERFACE_STANDARD ResetInterface;
+    BOOLEAN ResetInterfaceValid;
+    // Snapshot captured at enqueue time, holding its own extra
+    // InterfaceReference: the work item can outlive ReleaseHardware's
+    // dereference of ResetInterface (WDF flushes device work items at object
+    // cleanup, which is after ReleaseHardware).
+    DEVICE_RESET_INTERFACE_STANDARD PldrSnapshot;
+    WDFWORKITEM PldrWorkItem;
+    volatile LONG PldrQueued;
+
+    // DD-8: PIN_PAGES hands raw physical addresses to the iATU, valid only in
+    // an identity (untranslated) DMA domain. Probed once at PrepareHardware.
+    BOOLEAN DmaIdentityKnown;
+    BOOLEAN DmaIdentityMapped;
 
     // BAR inventory indexed by PCI BAR number (pci_resource_len parity).
     ULONGLONG BarLength[TT_MAX_BARS];
@@ -217,6 +249,8 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_FILE_CONTEXT, TtGetFileContext)
 EVT_WDF_DRIVER_DEVICE_ADD TtEvtDeviceAdd;
 EVT_WDF_DEVICE_PREPARE_HARDWARE TtEvtDevicePrepareHardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE TtEvtDeviceReleaseHardware;
+EVT_WDF_DEVICE_D0_ENTRY TtEvtDeviceD0Entry;
+EVT_WDF_DEVICE_D0_EXIT TtEvtDeviceD0Exit;
 EVT_WDF_DEVICE_SURPRISE_REMOVAL TtEvtDeviceSurpriseRemoval;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP TtEvtDeviceContextCleanup;
 EVT_WDF_DEVICE_FILE_CREATE TtEvtDeviceFileCreate;
@@ -273,6 +307,9 @@ NTSTATUS TtIoctlSetNocCleanup(_In_ PTT_DEVICE_CONTEXT Context,
 NTSTATUS TtIoctlResetDevice(_In_ PTT_DEVICE_CONTEXT Context,
                             _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
 VOID TtResetZapMappings(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtPciSaveState(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtDiscoverPcieCap(_In_ PTT_DEVICE_CONTEXT Context);
+EVT_WDF_WORKITEM TtPldrWorkItem;
 BOOLEAN TtCfgReadWord(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _Out_ USHORT *Value);
 VOID TtCfgWriteWord(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _In_ USHORT Value);
 VOID TtCfgWriteDword(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _In_ ULONG Value);
