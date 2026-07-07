@@ -61,6 +61,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "ttinfo build failed with exit code $LASTEXITCODE"
 }
 
+# ttwin_compat shim + its conformance suite (M6).
+$ttconform = Join-Path $PSScriptRoot 'src\tests\ttconform\ttconform.vcxproj'
+cmd /c "`"$ewdk\BuildEnv\SetupBuildEnv.cmd`" && msbuild `"$ttconform`" /nologo /m /warnaserror /p:Configuration=$Configuration /p:Platform=x64"
+if ($LASTEXITCODE -ne 0) {
+    throw "ttconform build failed with exit code $LASTEXITCODE"
+}
+
 $outDir = Join-Path $PSScriptRoot "src\driver\x64\$Configuration"
 
 # The driver targets stage the package (x64\<config>\ttkmd\), run Inf2Cat, and

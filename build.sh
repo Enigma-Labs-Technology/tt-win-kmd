@@ -45,4 +45,5 @@ SRC="$STAGE_WSL/src/driver/x64/$CONFIG"
 find "$SRC" \( -name 'ttkmd.sys' -o -name 'ttkmd.inf' -o -name '*.cat' -o -name 'ttkmd.pdb' -o -name 'tt-test.cer' \) \
     -exec cp -v {} "$OUT/" \;
 cp -v "$STAGE_WSL/src/tests/ttinfo/x64/$CONFIG/ttinfo.exe" "$OUT/" 2>/dev/null || true
+cp -v "$STAGE_WSL/src/tests/ttconform/x64/$CONFIG/ttconform.exe" "$OUT/" 2>/dev/null || true
 echo "Artifacts in $OUT"

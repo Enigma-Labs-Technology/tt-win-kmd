@@ -29,6 +29,10 @@ DEFINE_GUID(GUID_DEVINTERFACE_TENSTORRENT,
 // IOCTL API version; parity with TENSTORRENT_DRIVER_VERSION (tt-kmd/ioctl.h:10).
 #define TENSTORRENT_DRIVER_VERSION 2
 
+// Linux ioctl magic (tt-kmd/ioctl.h:12). The shim uses it to decode the
+// TENSTORRENT_IOCTL_* request values tt-umd passes (which are _IO(0xFA, nr)).
+#define TENSTORRENT_IOCTL_MAGIC 0xFA
+
 // Windows CTL_CODEs. One per Linux ioctl nr (tt-kmd/ioctl.h:14-30); codes are
 // 0x80FA2000 + 4*nr. Handlers land milestone by milestone (parity matrix).
 #define IOCTL_TENSTORRENT_GET_DEVICE_INFO   TT_CTL(0)
