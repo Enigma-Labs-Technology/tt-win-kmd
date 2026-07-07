@@ -64,3 +64,15 @@ irrecoverably, enabling test signing on the host is an explicit user decision, n
 a default.
 
 **Status:** Adopted; test rig is task #8.
+
+## OQ-4: ttsim models the BH ARC msgqueue natively (M2 feasibility) — RESOLVED
+
+**Question:** Does M2's acceptance (heartbeat advancing, ARC round-trip on ttsim)
+require loading management-firmware blobs into the simulator?
+
+**Answer (2026-07-07):** No. ttsim emulates CMFW-visible state in C++ for
+Blackhole (`ttsim/src/tile.cpp:266-295`): telemetry table at CSM+0x100 / values
+at +0x200, ARC message QCB at CSM+0x300 and queues at +0x400 (4 queues × 8
+entries × 32-byte entries, 32-byte header — matching the protocol in analysis
+§09), board ID P150 (primary target p150a). The BAR0 CSM window
+(0x1FE80000-0x1FEFFFFF) routes to this memory. M2 tests run against stock ttsim.
