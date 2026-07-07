@@ -161,3 +161,51 @@ dirties write-locked pages automatically (unpin_user_pages_dirty_lock parity).
 process singleton so the rig cannot exercise it — implementation deferred with
 the matrix row noting the blocker. EXPORT_TLB_DMABUF (16) → STATUS_NOT_SUPPORTED
 per the matrix design note. SET_NOC_CLEANUP (14) lands with M5 lifecycle work.
+
+## DD-9: M4 reset/lifecycle design
+
+**reset_rwsem → ERESOURCE.** A device-context `ERESOURCE` (ExInitializeResourceLite)
+serializes reset against all else: RESET_DEVICE acquires exclusive, every other
+ioctl and MAP/UNMAP/PIN/UNPIN and file cleanup acquire shared (under
+KeEnterCriticalRegion). Exclusive acquire drains in-flight shared holders — the
+Linux "reset waits for in-flight ioctls" behavior. All handlers run at PASSIVE.
+
+**Gen-bump fd invalidation (the spec's explicit criterion).** `ResetGen` is a
+device LONG64; each file object latches `OpenResetGen` at create. Destructive
+flavors bump `ResetGen` and re-latch the *resetter's* file object (bump_reset_gen
+parity), so every other open handle fails the gate with STATUS_DEVICE_REMOVED
+(-ENODEV) permanently, while the resetter keeps a live handle to finish the
+sequence. Post-reset, only GET_DEVICE_INFO / GET_DRIVER_INFO / RESET_DEVICE are
+allowed until POST_RESET clears `NeedsHwInit` (chardev.c:616-624).
+
+**VMA-zap → tracked-mapping teardown.** Windows has no zap-PTEs primitive, so the
+port tracks every user mapping (already true since M3) plus the creating
+PEPROCESS, and on a destructive reset unmaps them all: same-process mappings via
+MmUnmapLockedPages in-context, cross-process via KeStackAttachProcess. After
+unmap the user VA is gone, so any stale access faults (STATUS_ACCESS_VIOLATION) —
+the "torn down or fault safely, never dangle" requirement (spec constraint 5).
+DMA-buffer mappings are NOT zapped (Linux parity: they are host RAM, refcounted
+by the handle). A device-global file-object list (guarded by the reset resource
+held exclusive during zap) lets the resetter reach every handle's mappings.
+
+**Reset flavors on the rig.** The seven flavors and their wrapper semantics
+(gen-bump / zap / needs_hw_init / result=!ok) are ported exactly. Hardware
+triggers: `pcie_timer_interrupt` (CONFIG_WRITE, BH ASIC_RESET) and the reset
+marker (PCI_COMMAND parity bit) are config-space accesses to the device's OWN
+config space, ported via BUS_INTERFACE_STANDARD Get/SetBusData (kept referenced
+from PrepareHardware). The secondary-bus reset (RESET_PCIE_LINK) touches the
+upstream bridge, which a KMDF function driver cannot do; it maps to the PCI reset
+interface where available and is otherwise a documented rig no-op (zap still
+runs). BH ASIC_DMC_RESET uses the ARC TRIGGER_RESET message (M2 msgqueue).
+
+**Config save/restore + MPS (deferred, OQ-5).** Full pci_save_state/restore and
+the DBI Max-Payload-Size snapshot are real-hardware refinements; on the ttsim rig
+the fake reset preserves BARs, so `safe_pci_restore_state` reduces to a
+device-present check (vendor ID readback). init_hardware re-run sends ASIC_STATE0
++ SET_WDT_TIMEOUT and re-probes telemetry (blackhole.c:620-639 parity).
+
+**Surprise removal.** EvtDeviceSurpriseRemoval sets `Detached` and zaps mappings;
+the gate then returns STATUS_DEVICE_REMOVED for everything. iATU teardown already
+skips hardware writes when Detached (M3). Test-rig glue models the chip reset by
+clearing the PCI_COMMAND parity marker when the interface-timer-interrupt fires,
+so POST_RESET's marker check succeeds.
