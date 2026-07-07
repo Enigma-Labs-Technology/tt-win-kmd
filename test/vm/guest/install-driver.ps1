@@ -12,14 +12,18 @@ if ($LASTEXITCODE -ne 0) { throw "pnputil /add-driver failed: $LASTEXITCODE" }
 
 # Soft devnode for hardware-free load testing (M0 acceptance).
 # devgen.exe ships in the WDK (Tools\10.0.26100.0\x64) and is copied into the drop.
-$existing = & pnputil /enum-devices /ids | Select-String -SimpleMatch 'ROOT\TTKMD_SOFT'
-if (-not $existing) {
-    & "$drop\devgen.exe" /add /bus ROOT /hardwareid "TTKMD_SOFT"
+# Note: devgen instance IDs are ROOT\DEVGEN\{guid}; match on the HARDWARE id.
+function Get-SoftDev {
+    Get-PnpDevice -PresentOnly | Where-Object { $_.HardwareID -contains 'ROOT\TTKMD_SOFT' } | Select-Object -First 1
+}
+
+if (-not (Get-SoftDev)) {
+    & "$drop\devgen.exe" /add /bus ROOT /hardwareid "ROOT\TTKMD_SOFT"
     if ($LASTEXITCODE -ne 0) { throw "devgen failed: $LASTEXITCODE" }
 }
 
 Start-Sleep -Seconds 3
-$dev = Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'ROOT\TTKMD_SOFT*' }
+$dev = Get-SoftDev
 if (-not $dev) { throw 'soft device not found after devgen' }
 if ($dev.Status -ne 'OK') {
     Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName DEVPKEY_Device_ProblemCode |

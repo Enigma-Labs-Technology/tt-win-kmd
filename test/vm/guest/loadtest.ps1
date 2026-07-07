@@ -7,7 +7,7 @@ $drop = Split-Path -Parent $MyInvocation.MyCommand.Path
 $since = Get-Date
 
 function Get-SoftDev {
-    Get-PnpDevice -PresentOnly:$false | Where-Object { $_.InstanceId -like 'ROOT\TTKMD_SOFT*' } | Select-Object -First 1
+    Get-PnpDevice | Where-Object { $_.HardwareID -contains 'ROOT\TTKMD_SOFT' } | Select-Object -First 1
 }
 
 $dev = Get-SoftDev
@@ -23,7 +23,7 @@ for ($i = 1; $i -le $ToggleCycles; $i++) {
 for ($i = 1; $i -le $ReinstallCycles; $i++) {
     pnputil /remove-device $dev.InstanceId | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "remove cycle ${i}: $LASTEXITCODE" }
-    & "$drop\devgen.exe" /add /bus ROOT /hardwareid "TTKMD_SOFT" | Out-Null
+    & "$drop\devgen.exe" /add /bus ROOT /hardwareid "ROOT\TTKMD_SOFT" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "devgen cycle ${i}: $LASTEXITCODE" }
     Start-Sleep -Seconds 2
     $dev = Get-SoftDev
