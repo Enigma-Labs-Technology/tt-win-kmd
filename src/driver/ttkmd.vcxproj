@@ -59,6 +59,14 @@
            builds: see docs/signing-and-deployment.md. -->
       <PreprocessorDefinitions>TT_DEBUG_INTERFACES=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <Link>
+      <!-- Kernel-mode Hardware-enforced Stack Protection (kernel CET shadow
+           stacks) blocks drivers without CETCOMPAT metadata from loading
+           (observed live: StartService error 1450 on a host with
+           DeviceGuard\Scenarios\KernelShadowStacks Enabled=1). Plain C KMDF
+           code with no stack switching is shadow-stack safe. -->
+      <AdditionalOptions>/CETCOMPAT %(AdditionalOptions)</AdditionalOptions>
+    </Link>
     <Inf>
       <TimeStamp>*</TimeStamp>
     </Inf>
