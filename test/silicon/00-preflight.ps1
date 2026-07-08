@@ -22,6 +22,16 @@ if ($blv -and $blv.ProtectionStatus -eq 'On') {
     Write-Host 'BitLocker: protection off or not present - Secure Boot change is safe.'
 }
 
+# --- Memory Integrity (HVCI): its VTL1 CI policy rejects self-signed test
+# certs with STATUS_ACCESS_DENIED even when testsigning is on ---
+$hvci = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -ErrorAction SilentlyContinue).Enabled
+$dg = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction SilentlyContinue
+if ($hvci -eq 1 -or ($dg -and $dg.SecurityServicesRunning -contains 2)) {
+    Write-Warning 'Memory Integrity (HVCI) is enabled - the test-signed driver will fail to load with STATUS_ACCESS_DENIED (Code 39). Disable it: Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity -Name Enabled -Value 0, then reboot. (Re-enable with Secure Boot after the campaign.)'
+} else {
+    Write-Host 'Memory Integrity (HVCI): off.'
+}
+
 # --- Secure Boot / test signing gates ---
 $sb = Confirm-SecureBootUEFI
 "SecureBoot=$sb" | Out-File "$log\secureboot.txt"
