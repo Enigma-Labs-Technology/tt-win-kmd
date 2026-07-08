@@ -56,8 +56,8 @@ byte-identical output).
 
 | Rung | Command | Result | Heartbeat after | Notes |
 |---|---|---|---|---|
-| a install+bind | 20-install-driver.ps1 | ☐ | — | Status/Service: ____ |
-| b info/map/telem (read-only) | ttinfo.exe | ☐ | H0=____ | |
+| a install+bind | 20-install-driver.ps1 | **PASS** 2026-07-08 | — | Status OK, Service ttkmd, pkg oem36. Host gauntlet first: HVCI off, /CETCOMPAT (b7a5f74), FACEIT AC disabled — see "Host security gauntlet" below |
+| b info/map/telem (read-only) | ttinfo.exe | **PASS** exit 0 | advancing (in-dump assert) | present-mask 0x1fff; BARs 512M/1M/32G; all values vs GT: exacts exact, lives in range; fw 19.6.0.0 = anchor; 0 WHEA, 0 bugcheck |
 | c TLB + safe reg reads | ttinfo --only tlb | ☐ | ____ | NOC_ID ∈{2,11}: __ |
 | d DMA loopback | ttinfo --only dma | ☐ | ____ | identity probe: __ |
 | e PIN_PAGES | ttinfo --only pin | ☐ | ____ | phys=________ |
@@ -167,6 +167,22 @@ This is exactly the DD-12 sequence. Windows-side confirmation still to record:
    BAR0 decodes: ☐; Command MSE/BME restored: ☐; marker clear: ☐;
    MPS after restore = ____ (expect **512** / enc 2, NOT the 1024 device max):
    ☐; MRRS = 4096 (enc 5): ☐; WHEA/AER events post-reset: ____.
+
+## Host security gauntlet (first-load failures and resolutions)
+
+Four independent host mechanisms blocked the test-signed driver before first
+load; each masked the next. Recorded so future bring-ups run preflight first
+(00-preflight.ps1 now gates all four):
+
+| # | Gate | Symptom | Resolution |
+|---|---|---|---|
+| 1 | Secure Boot | testsigning ignored | disabled in UEFI (campaign only) |
+| 2 | Memory Integrity (HVCI) | Code 39, status 0xC0000022; VTL1 CI rejects test certs even in test mode | Core Isolation → Memory integrity off + reboot |
+| 3 | Kernel CET shadow stacks (`KernelShadowStacks Enabled=1`) | StartService 1450 / 0xC000009A, DriverEntry never reached | binary linked /CETCOMPAT (b7a5f74) — enforcement kept ON |
+| 4 | FACEIT anti-cheat (`FACEIT_AC.sys`, `FACEIT_IOMMU.sys`, system-start) | rotating generic statuses; CI verbose shows the file never opened — kernel callback veto before CI | both services disabled + reboot (campaign only) |
+
+Teardown checklist additions: re-enable Secure Boot, Memory Integrity, FACEIT
+(`sc config ... start= system`), remove test cert from Root/TrustedPublisher.
 
 ## Reset behavior expectations (from Linux ground truth)
 
