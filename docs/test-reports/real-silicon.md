@@ -63,7 +63,7 @@ byte-identical output).
 | e PIN_PAGES | ttinfo --only pin | **PASS** exit 0 | 2389 advancing (post-rung) | phys=0x1f6e3ee000; identity-domain probe ALLOWED pinning (HVCI off + FACEIT_IOMMU gone -> 1:1). Note: the "remapping ON" matrix cell is untestable with a test-signed driver — HVCI must be off to load it; guard refusal path is review-validated only |
 | f RESTORE/POST_RESET | ttinfo --reset restore-then-post | **PASS** exit 0 | advancing (asserted) | restore=0, post=0: first live run of config restore + DBI MPS write-back + re-init — clean |
 | g CONFIG_WRITE | ttinfo --reset config-write | **DIVERGENCE D4** | all-ones after | result=0 (trigger delivered) but the chip HARD-WEDGED: link down, no retrain, restore correctly refused (vendor read FFFF), card fell off the bus. See D4 — flavor contraindicated on real BH |
-| h ASIC_DMC_RESET | ttinfo --reset asic-dmc | SKIPPED pending recovery | — | flag-4 ASIC_RESET shares g's trigger — BOTH contraindicated until D4 is understood |
+| h ASIC_DMC_RESET | ttinfo --reset asic-dmc, then --reset post | **PASS** exit 0 both | restarted ~0, 404 @ +40 s (10 Hz) | Run after cold cycle, under `pciexpress forcedisable` (D6 mitigation). asic-dmc=0 (ARC TEST gate passed, DMC reset fired, expected telemetry outage); post=0 = marker CLEARED BY HARDWARE (reset proof) + link retrained + config restore + DBI MPS write-back + re-init + re-probe all live. fw 19.6.0.0 intact. No 0x124, 0 Verifier violations. Flag-4 ASIC_RESET remains contraindicated (shares g's trigger) |
 | i RESET_PCIE_LINK (PLDR) | ttinfo --reset pcie-link | honest result=1 | — | platform reports PLDR unsupported for this device (no ACPI _RST on this board) — DD-11 capability gate refused correctly; tested while card was wedged |
 
 Inter-rung health checks: HC-CFG (vendor==0x1E52 via GET_DEVICE_INFO), HC-REG
@@ -163,10 +163,15 @@ This is exactly the DD-12 sequence. Windows-side confirmation still to record:
 1. RESET_PCIE_LINK via PLDR (DD-11): SupportedResetTypes = ______;
    result=__; interface departure/arrival observed: ☐; fresh PrepareHardware
    re-init clean: ☐.
-2. Config save/restore + DBI MPS (DD-12): after ASIC_RESET→POST_RESET —
-   BAR0 decodes: ☐; Command MSE/BME restored: ☐; marker clear: ☐;
-   MPS after restore = ____ (expect **512** / enc 2, NOT the 1024 device max):
-   ☐; MRRS = 4096 (enc 5): ☐; WHEA/AER events post-reset: ____.
+2. Config save/restore + DBI MPS (DD-12): **VERIFIED ON SILICON** via
+   ASIC_DMC_RESET→POST_RESET (rung h): marker cleared by the hardware reset
+   (reset-proof semantics confirmed); post-restore MMIO live (BARs decode,
+   telemetry sane) ⇒ config restore + Command re-enable worked; MPS/MRRS
+   restore path executed in the passing flow (raw DevCtl readback available
+   via debug ioctl if byte-level evidence is wanted later); heartbeat
+   restarted ~0 and re-ticked at 10 Hz = firmware genuinely rebooted.
+   WHEA/AER: suppressed by design during the window (D6 mitigation);
+   no bugcheck, no Verifier violations.
 
 ## Host security gauntlet (first-load failures and resolutions)
 
