@@ -61,10 +61,10 @@ byte-identical output).
 | c TLB + safe reg reads | ttinfo --only tlb | **PASS** exit 0 | advancing (in-test, both paths) | 2M window to ARC (8,0) via TLB-map and open-BAR0 paths; EBUSY/double-free negatives correct |
 | d DMA loopback | ttinfo --only dma | **PASS** exit 0 | advancing | 64K common buffer CPU-verified, bus=0x201a469000 (<2^58); iATU region noc=0x13ffffffffff0000 (inside 4<<58 aperture, top-down) |
 | e PIN_PAGES | ttinfo --only pin | **PASS** exit 0 | 2389 advancing (post-rung) | phys=0x1f6e3ee000; identity-domain probe ALLOWED pinning (HVCI off + FACEIT_IOMMU gone -> 1:1). Note: the "remapping ON" matrix cell is untestable with a test-signed driver — HVCI must be off to load it; guard refusal path is review-validated only |
-| f RESTORE/POST_RESET | ttinfo --reset restore-then-post | ☐ | ____ | result=__, MPS after=__ |
-| g CONFIG_WRITE | ttinfo --reset config-write | ☐ | ____ | stale handle→REMOVED: __ |
-| h ASIC_DMC_RESET | ttinfo --reset asic-dmc | ☐ | ____ | ARC TEST ok: __ |
-| i RESET_PCIE_LINK (PLDR) | ttinfo --reset pcie-link | ☐ | ____ | re-enum observed: __ |
+| f RESTORE/POST_RESET | ttinfo --reset restore-then-post | **PASS** exit 0 | advancing (asserted) | restore=0, post=0: first live run of config restore + DBI MPS write-back + re-init — clean |
+| g CONFIG_WRITE | ttinfo --reset config-write | **DIVERGENCE D4** | all-ones after | result=0 (trigger delivered) but the chip HARD-WEDGED: link down, no retrain, restore correctly refused (vendor read FFFF), card fell off the bus. See D4 — flavor contraindicated on real BH |
+| h ASIC_DMC_RESET | ttinfo --reset asic-dmc | SKIPPED pending recovery | — | flag-4 ASIC_RESET shares g's trigger — BOTH contraindicated until D4 is understood |
+| i RESET_PCIE_LINK (PLDR) | ttinfo --reset pcie-link | honest result=1 | — | platform reports PLDR unsupported for this device (no ACPI _RST on this board) — DD-11 capability gate refused correctly; tested while card was wedged |
 
 Inter-rung health checks: HC-CFG (vendor==0x1E52 via GET_DEVICE_INFO), HC-REG
 (NOC_ID @BAR0 0x1FD04044 & 0x3F ∈ {2,11}), HC-HB (QUERY_TELEMETRY heartbeat
@@ -205,7 +205,8 @@ rungs (f–i) must tolerate:
 | D1 | h/i ASIC-DMC / link reset | Windows platform **DPC** likely surprise-removes + re-enumerates the device during a driver-initiated reset (Linux stays in-place) | `dmesg-reset.txt`: root-port DPC containment, Uncorrectable Fatal, SDES surprise-down; tt-kmd has no `error_detected` cb so Linux logs "recovery failed" yet keeps working | The reset drops the PCIe link; the AMD root port's DPC contains it. Linux ignores AER and resets in place; Windows DPC/ACPI error handling engages and may tear the stack down | **OQ-6** filed. Run rung h under Verifier with recovery armed; expect possible re-enum (treat like DD-11 PLDR: reopen handle, run POST_RESET on a fresh one). Fix precisely only if it bugchecks. |
 | D2 | e PIN_PAGES (IOMMU on) | expect STATUS_NOT_SUPPORTED where Linux's discontiguous pin succeeds | `iommu.txt` (AMD-Vi Translated); suite pins discontiguous OK | DD-8: Windows port has no translated-domain pin path; guard refuses to avoid corruption | Documented gap, not a regression. See DMA matrix. |
 | D3 | telemetry | m3app_fw_ver (0.22.0.0), CM-ARC/ETH FW (None) not surfaced by QUERY_TELEMETRY | manifest.txt | struct exposes fw_bundle only; BH has no CM/ETH FW | Cosmetic coverage gap; tolerate absent, do not error. |
-| D4 | — | — | — | — | — |
+| D4 | g CONFIG_WRITE (and by trigger-sharing, ASIC_RESET flag 4) | Chip reset fired, then PCIe link permanently down: config reads FFFF, no autonomous retrain, endpoint absent after parent-port rescan (phantom). No DPC/AER/WHEA events on Windows. Recovery required PERST# (cold power cycle) | Linux GT never exercised this flavor — tt-smi resets via the DMC path (flag 5); Linux's DPC handler also contains+recovers the port on link-down, Windows client logged nothing | `pcie_timer_interrupt` (cfg 0x930/0x934) on real BH appears to hard-reset the DWC controller without firmware coordinating link re-train — un-validated flavor on silicon | CONTRAINDICATE flavors 2 and 4 on real BH pending upstream clarification (candidate OQ-7); tooling should use DMC (5) + POST_RESET. ttinfo gained no guard — operator ladder only |
+| D5 | i RESET_PCIE_LINK | PLDR unsupported on this platform (`SupportedResetTypes` lacks PlatformLevelDeviceReset — consumer board, no ACPI _RST); honest result=1 | Linux SBR via upstream bridge works (pcie.c:61-90) | Windows exposes no supported in-band link reset for this device on this board | DD-11 refusal path validated. Windows-side link recovery escalates: parent-port restart (insufficient for a dead endpoint) → warm reboot → cold power cycle |
 
 ## 24-hour soak
 
