@@ -205,6 +205,22 @@ rungs (f–i) must tolerate:
 | WER bugcheck records (1001) | 0 | | 0 |
 | soak batches exit 0 | | | all |
 
+## Performance baseline (for the Windows TLB-throughput comparison)
+
+Linux `ttkmd_bench` on the same card, 2 MiB BAR aperture → DRAM NoC core, card
+idle (`real-silicon-linux/benchmark/results-linux.txt`):
+
+| Metric | Linux | Windows | Notes |
+|---|---|---|---|
+| WC write host→dev | 7.99 GB/s | ____ | our WC mapping = MmWriteCombined (memory.c) |
+| UC write host→dev | 7.99 GB/s | ____ | our UC mapping = MmNonCached |
+| UC read dev→host | 0.04 GB/s | ____ | UC reads are inherently slow |
+| MMIO read latency | 741 ns | ____ | 200k reads |
+
+Note the Linux WC and UC write rates are equal here (~8 GB/s) — the write path
+is bandwidth-limited beyond the mapping type. A Windows WC write far below
+~8 GB/s would point at the mapping-attribute selection, not the hardware.
+
 ## Go / No-Go recommendation
 
 - Rungs a-e (non-destructive): ☐ GREEN ☐ RED — __________
