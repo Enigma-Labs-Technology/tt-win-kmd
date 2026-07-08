@@ -109,3 +109,49 @@ ASIC_RESET→POST_RESET, BARs decode after restore, PLDR re-enumeration
 round-trip — per the real-silicon test ladder (rungs f-i). Neither change
 affects the M4-tested rig behaviors (fd invalidation, mapping zap,
 reset-window semantics).
+
+## OQ-6: Windows platform DPC during a driver-initiated reset — OPEN (silicon-only)
+
+**Question:** On this AMD host, a driver-initiated ASIC/DMC reset drops the
+PCIe link (surprise-down), which the upstream root port's Downstream Port
+Containment (DPC) treats as an uncorrectable fatal error. On Linux this is
+benign; what does Windows do, and does the KMDF port survive it?
+
+**Evidence (Linux ground truth, `real-silicon-linux/`):** `dmesg-reset.txt`
+shows, at the instant of `tt-smi -r 0`: `pcieport 0000:c0:01.1: DPC:
+containment event ... Uncorrectable (Fatal) ... [5] SDES (First)` and
+`tenstorrent 0000:c1:00.0: AER: can't recover (no error_detected callback)` /
+`AER: device recovery failed`. Linux survives only because tt-kmd registers NO
+AER `error_detected` callback and performs an **in-place** reset — the device
+never leaves the bus and keeps working (post-reset `ttkmd_test` exit 0). The
+reset is otherwise clean: ~2.75 s wall, ~1.64 s telemetry outage, heartbeat
+restarts from ~0, all architected config restored by the driver.
+
+**Hypotheses (ranked):**
+1. Windows PCI DPC (pci.sys / the DPC driver on the AMD root port) contains the
+   surprise-down by disabling the downstream port and **surprise-removing** our
+   device, then re-enumerating when the link returns — so ASIC_DMC_RESET on
+   Windows behaves like a PLDR (DD-11): stack teardown + fresh PrepareHardware,
+   NOT Linux's in-place reset. Our existing surprise-removal machinery
+   (`Detached`, mapping zap, ResetGen) and re-enum re-init should absorb it;
+   the POST_RESET from the original handle correctly returns DEVICE_REMOVED.
+   **(most likely)**
+2. The platform masks/holds DPC (firmware policy) and the link recovers
+   in-place as on Linux — POST_RESET completes normally.
+3. DPC fires while the reset thread holds the reset ERESOURCE and is mid-MMIO
+   (ARC NOC reads), racing ReleaseHardware's BAR unmap — a potential
+   use-after-unmap / bugcheck. This is the failure mode Driver Verifier + the
+   gated hardware run must exercise.
+
+**Isolation:** `TtBhReset` / the RESET_DEVICE dispatch in `reset.c`;
+surprise-removal in `TtEvtDeviceSurpriseRemoval`. Possible future mitigations
+(only if hypothesis 3 materializes): mask SDES/DPC around the initiated reset,
+or route ASIC resets through the pci.sys bus-specific reset that coordinates
+with the port — both larger changes, deferred until hardware shows they are
+needed.
+
+**Status:** OPEN — no code change made blind. The reset ladder runs rung h
+under Verifier with the tt-flash/Linux recovery path armed; the report's
+divergence log (D1) tracks the observed Windows behavior, and this OQ resolves
+(or a precise fix is filed) from that run. Do NOT assume Linux's in-place
+semantics on Windows.

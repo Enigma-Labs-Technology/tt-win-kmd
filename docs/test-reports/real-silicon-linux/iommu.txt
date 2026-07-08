@@ -1,0 +1,58 @@
+== /proc/cmdline ==
+rtc_cmos.use_acpi_alarm=1 resume=/dev/mapper/root resume_offset=4728064 quiet splash loglevel=0 systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 cryptdevice=PARTUUID=ad9c0e05-3820-4597-8bd6-0c00438f916e:root root=/dev/mapper/root zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs
+
+== IOMMU group for 0000:c1:00.0 ==
+/sys/kernel/iommu_groups/9/devices/0000:c1:00.0
+group type: DMA-FQ
+group 9 members:
+0000:c1:00.0
+
+== /sys/class/iommu ==
+ivhd0
+ivhd1
+ivhd2
+ivhd3
+
+== amd_iommu sysfs ==
+
+== journalctl kernel iommu (may be permission-limited) ==
+Jul 08 08:51:05 omarchy kernel: AMD-Vi: Using global IVHD EFR:0x25bf732fa2295afe, EFR2:0x53d
+Jul 08 08:51:05 omarchy kernel: iommu: Default domain type: Translated
+Jul 08 08:51:05 omarchy kernel: iommu: DMA domain TLB invalidation policy: lazy mode
+Jul 08 08:51:05 omarchy kernel: pci 0000:f0:00.2: AMD-Vi: IOMMU performance counters supported
+Jul 08 08:51:05 omarchy kernel: pci 0000:f0:01.0: Adding to iommu group 0
+Jul 08 08:51:05 omarchy kernel: pci 0000:f0:02.0: Adding to iommu group 1
+Jul 08 08:51:05 omarchy kernel: pci 0000:f0:03.0: Adding to iommu group 2
+Jul 08 08:51:05 omarchy kernel: pci 0000:f0:04.0: Adding to iommu group 3
+Jul 08 08:51:05 omarchy kernel: pci 0000:f0:05.0: Adding to iommu group 4
+Jul 08 08:51:05 omarchy kernel: pci 0000:f0:07.0: Adding to iommu group 5
+Jul 08 08:51:05 omarchy kernel: pci 0000:f0:07.1: Adding to iommu group 5
+Jul 08 08:51:05 omarchy kernel: pci 0000:f1:00.0: Adding to iommu group 5
+Jul 08 08:51:05 omarchy kernel: pci 0000:f1:00.4: Adding to iommu group 5
+Jul 08 08:51:05 omarchy kernel: pci 0000:c0:01.0: Adding to iommu group 6
+Jul 08 08:51:05 omarchy kernel: pci 0000:c0:01.1: Adding to iommu group 7
+Jul 08 08:51:05 omarchy kernel: pci 0000:c0:02.0: Adding to iommu group 8
+Jul 08 08:51:05 omarchy kernel: pci 0000:c1:00.0: Adding to iommu group 9
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:00.2: AMD-Vi: IOMMU performance counters supported
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:01.0: Adding to iommu group 10
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:01.3: Adding to iommu group 11
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:02.0: Adding to iommu group 12
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:03.0: Adding to iommu group 13
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:03.1: Adding to iommu group 14
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:03.3: Adding to iommu group 15
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:04.0: Adding to iommu group 16
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:05.0: Adding to iommu group 17
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:07.0: Adding to iommu group 18
+Jul 08 08:51:05 omarchy kernel: pci 0000:d0:07.1: Adding to iommu group 18
+Jul 08 08:51:05 omarchy kernel: pci 0000:d1:00.0: Adding to iommu group 19
+Jul 08 08:51:05 omarchy kernel: pci 0000:d2:00.0: Adding to iommu group 20
+Jul 08 08:51:05 omarchy kernel: pci 0000:d2:00.1: Adding to iommu group 21
+Jul 08 08:51:05 omarchy kernel: pci 0000:d4:00.0: Adding to iommu group 22
+Jul 08 08:51:05 omarchy kernel: pci 0000:d5:00.0: Adding to iommu group 22
+Jul 08 08:51:05 omarchy kernel: pci 0000:d6:00.0: Adding to iommu group 18
+Jul 08 08:51:05 omarchy kernel: pci 0000:d6:00.5: Adding to iommu group 18
+Jul 08 08:51:05 omarchy kernel: pci 0000:e0:01.0: Adding to iommu group 23
+Jul 08 08:51:05 omarchy kernel: pci 0000:e0:01.1: Adding to iommu group 24
+Jul 08 08:51:05 omarchy kernel: pci 0000:e0:02.0: Adding to iommu group 25
+Jul 08 08:51:05 omarchy kernel: pci 0000:e1:00.0: Adding to iommu group 26
+Jul 08 08:51:05 omarchy kernel: pci 0000:e1:00.1: Adding to iommu group 26

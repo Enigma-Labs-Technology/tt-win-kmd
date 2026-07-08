@@ -1,0 +1,39 @@
+# ttkmd_bench — Linux ground-truth results
+# host: omarchy  kernel: 7.0.10-arch1-1  tt-kmd: 2.9.1-pre  fw bundle: 19.6.0.0
+# card: p150a 0000:c1:00.0  Gen5 x16  MPS 512 / MRRS 4096  IOMMU on  (see ../manifest.txt)
+# captured: 2026-07-08T14:04:59Z, card idle
+
+== 3 consecutive runs ==
+-- run 1 --
+device 1e52:b140  bus c1:00.0  driver ABI v2 (2.9.1)
+
+  window: 2 MiB BAR aperture -> DRAM NoC core; best of 3
+  WC write  (host->dev):             7.99 GB/s   (512 MiB moved)
+  UC write  (host->dev):             7.99 GB/s   (512 MiB moved)
+  UC read   (dev->host):             0.04 GB/s   (16 MiB moved)
+  MMIO read latency:                741.3 ns     (200000 reads)
+
+JSON {"wc_write_GBps": 7.988, "uc_write_GBps": 7.992, "uc_read_GBps": 0.043, "read_latency_ns": 741.33}
+
+-- run 2 --
+device 1e52:b140  bus c1:00.0  driver ABI v2 (2.9.1)
+
+  window: 2 MiB BAR aperture -> DRAM NoC core; best of 3
+  WC write  (host->dev):             7.99 GB/s   (512 MiB moved)
+  UC write  (host->dev):             7.99 GB/s   (512 MiB moved)
+  UC read   (dev->host):             0.04 GB/s   (16 MiB moved)
+  MMIO read latency:                742.1 ns     (200000 reads)
+
+JSON {"wc_write_GBps": 7.992, "uc_write_GBps": 7.992, "uc_read_GBps": 0.043, "read_latency_ns": 742.07}
+
+-- run 3 --
+device 1e52:b140  bus c1:00.0  driver ABI v2 (2.9.1)
+
+  window: 2 MiB BAR aperture -> DRAM NoC core; best of 3
+  WC write  (host->dev):             7.99 GB/s   (512 MiB moved)
+  UC write  (host->dev):             7.99 GB/s   (512 MiB moved)
+  UC read   (dev->host):             0.04 GB/s   (16 MiB moved)
+  MMIO read latency:                741.6 ns     (200000 reads)
+
+JSON {"wc_write_GBps": 7.991, "uc_write_GBps": 7.992, "uc_read_GBps": 0.043, "read_latency_ns": 741.65}
+

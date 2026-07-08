@@ -1,0 +1,11 @@
+tt_heartbeat sampling — /sys/class/tenstorrent/tenstorrent!0/tt_heartbeat
+Captured 2026-07-08, card idle.
+
+sample0: t=1783515560.182658317 heartbeat=5470
+sample1: t=1783515565.186059540 heartbeat=5520
+
+elapsed_s = 5.0034
+delta     = 50 ticks
+rate      = 50 / 5.0034 = 9.99 ticks/s  (~10 Hz)
+
+Conclusion: heartbeat advances monotonically at ~10 Hz while idle.

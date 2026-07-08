@@ -1,0 +1,2 @@
+[ 1685.021026] tenstorrent 0000:c1:00.0: pin_user_pages_longterm failed: -14
+[ 1685.023819] tenstorrent 0000:c1:00.0: could only pin 1 of 2 pages

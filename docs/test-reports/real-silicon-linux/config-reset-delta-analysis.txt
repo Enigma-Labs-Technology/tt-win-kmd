@@ -1,0 +1,37 @@
+Analysis of config-reset-delta.txt (full 4 KiB config space, before vs after
+the 09:35:57 tt-smi reset; after-capture 09:50)
+=============================================================================
+
+ALL architected configuration is byte-identical across reset: standard header
+(BARs, COMMAND=0x0406, subsystem), PM, MSI (incl. address fee00004/data 0000),
+PCIe capability (DevCtl @0x78 = 0x515f -> MPS 512 / MRRS 4096 PRESERVED),
+DevCtl2, LnkCtl, AER config (ECRC bits, masks). Endpoint AER UESta is clean
+(SDES-) after reset — the surprise-down latched only on the root port.
+
+The changed bytes are exclusively live/vendor data, not configuration:
+  0x2e0-0x2f3 : inside VSEC ID=0002 @0x230 (len 0x100) payload
+  0x390-0x395 : inside VSEC ID=0003 @0x380 (len 0x54) payload
+  0x728-0x73a : non-capability region beyond the extended chain (>0x400),
+                device-specific; dword @0x728 increased 0x0022b491 ->
+                0x030ccb91 (counter-like)
+
+Mechanism (tt-kmd 2.9.1-pre source, explains the observation):
+  - probe:  pci_save_state()                                (enumerate.c:370,503)
+  - reset:  set_reset_marker() sets PCI_COMMAND_PARITY (0x40)     (pcie.c:140)
+            -> ASIC/DMC reset via ARC message                (blackhole.c:542+)
+            -> hardware reset clears COMMAND; driver polls
+               is_reset_marker_zero() to CONFIRM the reset        (pcie.c:151)
+            -> safe_pci_restore_state() restores saved config,
+               incl. DevCtl MPS/MRRS; then pci_save_state()     (pcie.c:43-58,
+               again to refresh the saved copy                chardev.c:213-248)
+
+OQ-5 answers:
+  (1) The PCI_COMMAND parity bit IS the reset marker and DOES clear across a
+      real reset — set pre-reset by the driver, cleared by the hardware reset
+      (whole COMMAND register resets), polled to confirm reset completion,
+      and left 0 by the subsequent config restore. Sampled outside the reset
+      window it reads 0 on both sides (observed).
+  (2) MPS/MRRS (512/4096) survive the reset because the DRIVER restores them
+      from state saved at probe — not because the hardware preserves them.
+      The Windows port must implement the same save -> marker -> reset ->
+      poll-marker-zero -> restore sequence.

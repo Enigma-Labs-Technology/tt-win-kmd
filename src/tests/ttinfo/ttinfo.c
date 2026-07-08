@@ -54,31 +54,40 @@ static BOOL TtIoctl(HANDLE h, DWORD code, void *buf, DWORD inLen, DWORD outLen,
 // is compiled out of release drivers), wait, read again. Wrap-tolerant: any u32
 // change means the chip is running. Requires TT_TELEM_PRESENT_HEARTBEAT in both
 // reads. waitMs==0 uses the 1500 ms default.
+// Reads TIMER_HEARTBEAT via the production QUERY_TELEMETRY and returns TRUE
+// once the counter is observed to change (wrap-tolerant: any change == the ARC
+// is running). Poll-based rather than a single sleep so it tolerates the
+// firmware-reboot outage measured on real silicon: after a reset,
+// QUERY_TELEMETRY fails for ~1.64 s and the counter restarts from ~0
+// (real-silicon-linux/reset-timing.txt). waitMs is the minimum observation
+// span; the total budget is at least ~5 s so a post-reset check does not
+// false-fail across the outage. A read failure is treated as "not yet", not
+// fatal — we keep polling until the deadline.
 static BOOL HeartbeatAdvances(HANDLE dev, DWORD waitMs)
 {
     struct tenstorrent_query_telemetry qt;
     DWORD info;
-    uint32_t hb1, hb2;
+    uint32_t first = 0;
+    BOOL haveFirst = FALSE;
+    DWORD span = waitMs ? waitMs : 1500;
+    DWORD budget = span < 5000 ? 5000 : span;   // tolerate ~2 s reset outage
+    DWORD elapsed;
 
-    memset(&qt, 0, sizeof(qt));
-    if (!TtIoctl(dev, IOCTL_TENSTORRENT_QUERY_TELEMETRY, &qt, sizeof(qt),
-                 sizeof(qt), &info) ||
-        !(qt.out.present & TT_TELEM_PRESENT_HEARTBEAT)) {
-        return FALSE;
+    for (elapsed = 0; elapsed <= budget; elapsed += 300) {
+        memset(&qt, 0, sizeof(qt));
+        if (TtIoctl(dev, IOCTL_TENSTORRENT_QUERY_TELEMETRY, &qt, sizeof(qt),
+                    sizeof(qt), &info) &&
+            (qt.out.present & TT_TELEM_PRESENT_HEARTBEAT)) {
+            if (!haveFirst) {
+                first = qt.out.heartbeat;
+                haveFirst = TRUE;
+            } else if (qt.out.heartbeat != first && elapsed >= span) {
+                return TRUE;
+            }
+        }
+        Sleep(300);
     }
-    hb1 = qt.out.heartbeat;
-
-    Sleep(waitMs ? waitMs : 1500);
-
-    memset(&qt, 0, sizeof(qt));
-    if (!TtIoctl(dev, IOCTL_TENSTORRENT_QUERY_TELEMETRY, &qt, sizeof(qt),
-                 sizeof(qt), &info) ||
-        !(qt.out.present & TT_TELEM_PRESENT_HEARTBEAT)) {
-        return FALSE;
-    }
-    hb2 = qt.out.heartbeat;
-
-    return hb2 != hb1;   // wrap-tolerant: treat any change as alive
+    return FALSE;
 }
 
 static void TestDriverInfo(HANDLE h)

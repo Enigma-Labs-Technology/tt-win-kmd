@@ -1,0 +1,6 @@
+Testing /dev/tenstorrent/0 @ 0000:c1:00.0
+Kernel rejects config space reads, skipping MSI test.
+Kernel rejects config space reads, skipping AER test.
+No huge pages could be allocated for VerifyPinPagesContiguous, test skipped.
+Debugfs mappings file not accessible, skipping test.
+exit: 0

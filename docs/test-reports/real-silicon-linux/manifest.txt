@@ -1,0 +1,102 @@
+GROUND-TRUTH REFERENCE MANIFEST — Tenstorrent Blackhole p150a on Linux
+========================================================================
+Capture timestamp : 2026-07-08 ~08:51-09:21 local (boot 08:51; base captures
+                    ~08:57-09:16, privileged run 09:18, tt-smi snapshot 09:21:21;
+                    base-set anchor 2026-07-08T13:02:43Z)
+Hostname          : omarchy
+Kernel            : Linux omarchy 7.0.10-arch1-1 #1 SMP PREEMPT_DYNAMIC Sat, 23 May 2026 14:21:20 +0000 x86_64 GNU/Linux
+tt-kmd version    : 2.9.1-pre (DKMS: tenstorrent-2.9.1/pre, installed for 7.0.10-arch1-1)
+tt-kmd source     : /home/alex/tt-kmd @ git ttkmd-2.9.0-1-g0ab170d (0ab170d "Bump version to 2.9.1-pre for development")
+
+*** FIRMWARE ANCHOR — Windows testing MUST use the SAME firmware ***
+  FW bundle version : 19.6.0.0   (tt_fw_bundle_ver; tt-smi raw 0x13060000)
+  M3/DMC app FW     : 0.22.0.0   (tt_m3app_fw_ver; tt-smi bm_app_fw, raw 0x160000)
+  CM(ARC) FW        : N/A — not populated on Blackhole (tt-smi cm_fw = N/A,
+                      raw ARC0-3_FW_VERSION = None). GROUND TRUTH: expect empty
+                      on Windows too.
+  ETH FW            : N/A — same (eth_fw = N/A, ETH_FW_VERSION = None)
+  tt-smi            : 3.1.1 (pyluwen 0.8.5), venv /home/alex/tt-test/.tt-smi-venv
+*******************************************************************
+
+PCI identity
+  BDF                : 0000:c1:00.0  (PCI domain/segment 0000)
+  Vendor:Device      : 1e52:b140  (Tenstorrent Blackhole)
+  Subsystem          : 1e52:0040  (lspci decodes as "p150a")
+  Class              : 0x120000 (Processing accelerator), revision 0x00
+  Link               : 32.0 GT/s PCIe (Gen5) x16, negotiated = max (LnkSta, root lspci)
+  MPS / MRRS         : MaxPayload 512 bytes in effect (DevCap supports 1024),
+                       MaxReadReq 4096 bytes (DevCtl, lspci-vvv-root.txt; raw
+                       DevCtl @0x78 = 0x515f). Resolves OQ-5 baseline.
+  IRQ                : 152, single-vector plain MSI (msi_irqs/152 = "msi"; NOT MSI-X)
+  INTx pin           : A (config 0x3d = 0x01), INTx disabled (DisINTx+). Beware:
+                       this host's lspci prints pin letters off-by-one ("pin B")
+  NUMA node          : -1
+  char device        : /dev/tenstorrent/0 (510:0, mode crw-rw-rw-)
+  by-id              : blackhole-7B772ECCB9DB2F81 -> ../0
+
+Card identity
+  Card type          : p150a       (tt_card_type)
+  Board serial       : 0000040331921017 (tt_serial)
+  ASIC ID            : 7B772ECCB9DB2F81 (tt_asic_id)
+
+Artifacts in this directory
+  00-summary.md               — full report
+  manifest.txt                — this file
+  modinfo.txt                 — modinfo tenstorrent
+  dmesg-tenstorrent.txt       — kernel log lines (via journalctl -kb)
+  lspci-vvv.txt               — lspci -vvvnn (UNPRIVILEGED: capabilities hidden;
+                                caveat appended re: bogus "pin B"/"MSI(X)" line)
+  lspci-config-header.txt     — lspci -x, first 64 bytes of config space (partial)
+  pci-sysfs-devnode.txt       — sysfs IDs, link speed/width, MSI mode, INT pin,
+                                numa_node, /dev/tenstorrent listing (evidence)
+  iommu.txt                   — IOMMU state evidence (ON, AMD-Vi, group 9, DMA-FQ)
+  sysfs-tt.txt                — all tt_* sysfs attributes
+  hwmon.txt                   — blackhole hwmon (temp/vcore/current/power/fan)
+  heartbeat-samples.txt       — tt_heartbeat rate proof (~10 Hz)
+  pcie-perf-counters.txt      — pcie_perf_counters sysfs snapshot
+  module-params.txt           — live module parameter values
+  test-suite-output.txt       — ttkmd_test golden run ("exit: 0" recorded in-file,
+                                4 root-gated skips)
+  capture-privileged.sh       — script for the sudo-gated captures (run 09:18)
+  lspci-vvv-root.txt          — FULL lspci -vvvnn as root: all capabilities,
+                                DevCtl MPS/MRRS, LnkSta, MSI cap (root-owned)
+  lspci-config-baseline.txt   — FULL 4 KiB config space (lspci -xxxx, root-owned)
+  test-suite-output-root.txt  — ttkmd_test as root: ZERO skips, exit 0
+  ftrace-or-dmesg.txt         — dmesg during root test run with pr_debug enabled
+                                (sparse: only the expected EFAULT pin lines)
+  tt-smi-snapshot.json        — tt-smi 3.1.1 full snapshot (raw SMBus telem,
+                                board info, telemetry, firmwares, limits)
+  tt-smi.txt                  — tt-smi version + board list
+
+Stage-5 reset artifacts (reset EXECUTED 09:35:57, successful, no reflash needed):
+  reset-timing.txt            — timing + full analysis (2.75 s reset, 1.64 s
+                                telemetry outage, in-place / no re-enumeration,
+                                DPC containment + failed AER recovery, header
+                                identical, parity bit 0 before and after)
+  reset-poller-samples.txt    — raw ~0.2 s presence/heartbeat samples
+  dmesg-reset.txt             — kernel DPC/AER lines during reset
+  tt-smi-reset-output.txt     — tt-smi -r 0 console output
+  lspci-config-before-reset.txt — full 4 KiB before (from 09:18 root baseline,
+                                header re-verified unchanged pre-reset)
+  test-suite-output-post-reset.txt — ttkmd_test post-reset: exit 0
+  tt-smi-snapshot-post-reset.json  — post-reset telemetry (healthy)
+  lspci-config-after-reset-header.txt — 64-byte header after reset
+                                (unprivileged; byte-identical to before)
+  stage5-after.sh             — sudo script for the full after-capture + delta
+
+Recovery path (verified present, NOT used): uvx tt-flash@latest (3.10.0);
+  /home/alex/fw_pack-19.6.0.fwbundle  = anchor-preserving recovery image
+  fw_pack-19.11.0.fwbundle (Downloads, tt-test, reference) = newer, changes anchor
+
+Stage-5 completion artifacts (stage5-after.sh run 09:50, root):
+  lspci-config-after-reset.txt   — full 4 KiB config space after reset
+  lspci-vvv-root-after-reset.txt — full lspci -vvvnn after reset
+  config-reset-delta.txt         — diff: only VSEC/live-counter bytes changed;
+                                   ALL architected config byte-identical,
+                                   DevCtl MPS 512 / MRRS 4096 preserved
+  config-reset-delta-analysis.txt — decode of the delta + the source-confirmed
+                                   mechanism (PCI_COMMAND parity bit = reset
+                                   marker, set/poll/restore via pci_save_state/
+                                   safe_pci_restore_state). OQ-5 RESOLVED.
+
+Everything requested in the capture plan is now on disk. No open gaps.

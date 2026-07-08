@@ -1,0 +1,13 @@
+== pcie_perf_counters ==
+mst_nonposted_wr_data_word_sent0 = 33
+mst_nonposted_wr_data_word_sent1 = 0
+mst_posted_wr_data_word_sent0 = 0
+mst_posted_wr_data_word_sent1 = 0
+mst_rd_data_word_received0 = 154
+mst_rd_data_word_received1 = 0
+slv_nonposted_wr_data_word_received0 = 2512
+slv_nonposted_wr_data_word_received1 = 23
+slv_posted_wr_data_word_received0 = 2
+slv_posted_wr_data_word_received1 = 0
+slv_rd_data_word_sent0 = 90606
+slv_rd_data_word_sent1 = 3

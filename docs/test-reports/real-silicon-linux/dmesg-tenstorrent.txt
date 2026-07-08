@@ -1,0 +1,15 @@
+# Kernel log lines mentioning tenstorrent, via journalctl -kb (dmesg is root-gated on this host).
+# NOTE: the pin_user_pages_longterm -14 (EFAULT) / 'could only pin' lines below are EXPECTED:
+# they are emitted by ttkmd_test's PinPages negative-path cases (pin_pages.cpp verifies that
+# pinning invalid/partially-unmapped ranges fails). They are NOT driver errors. The test suite
+# was run 3x this boot (~09:02 golden run, ~09:10 verification, ~09:1x exit-code recapture).
+# Driver load itself (08:51) logged zero errors.
+Jul 08 08:51:06 omarchy kernel: tenstorrent: Loading Tenstorrent AI driver module v2.9.1-pre
+Jul 08 08:51:06 omarchy kernel: tenstorrent 0000:c1:00.0: Found a Tenstorrent Blackhole device
+Jul 08 08:51:06 omarchy kernel: tenstorrent 0000:c1:00.0: enabling device (0000 -> 0002)
+Jul 08 09:02:08 omarchy kernel: tenstorrent 0000:c1:00.0: pin_user_pages_longterm failed: -14
+Jul 08 09:02:08 omarchy kernel: tenstorrent 0000:c1:00.0: could only pin 1 of 2 pages
+Jul 08 09:11:05 omarchy kernel: tenstorrent 0000:c1:00.0: pin_user_pages_longterm failed: -14
+Jul 08 09:11:05 omarchy kernel: tenstorrent 0000:c1:00.0: could only pin 1 of 2 pages
+Jul 08 09:14:58 omarchy kernel: tenstorrent 0000:c1:00.0: pin_user_pages_longterm failed: -14
+Jul 08 09:14:58 omarchy kernel: tenstorrent 0000:c1:00.0: could only pin 1 of 2 pages

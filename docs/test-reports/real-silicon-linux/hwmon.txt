@@ -1,0 +1,21 @@
+== /sys/class/hwmon/hwmon0 name=nvme ==
+== /sys/class/hwmon/hwmon1 name=nvme ==
+== /sys/class/hwmon/hwmon2 name=k10temp ==
+== /sys/class/hwmon/hwmon3 name=amd_hsmp_hwmon ==
+== /sys/class/hwmon/hwmon4 name=blackhole ==
+/sys/class/hwmon/hwmon4/temp1_input = 51431
+/sys/class/hwmon/hwmon4/temp1_label = asic_temp
+/sys/class/hwmon/hwmon4/temp1_max = 90000
+/sys/class/hwmon/hwmon4/in0_input = 740
+/sys/class/hwmon/hwmon4/in0_label = vcore
+/sys/class/hwmon/hwmon4/in0_max = 900
+/sys/class/hwmon/hwmon4/curr1_input = 52000
+/sys/class/hwmon/hwmon4/curr1_label = current
+/sys/class/hwmon/hwmon4/curr1_max = 200000
+/sys/class/hwmon/hwmon4/power1_input = 38000000
+/sys/class/hwmon/hwmon4/power1_label = power
+/sys/class/hwmon/hwmon4/power1_max = 150000000
+/sys/class/hwmon/hwmon4/fan1_input = 2000
+/sys/class/hwmon/hwmon4/fan1_label = fan_rpm
+== /sys/class/hwmon/hwmon5 name=asusec ==
+== /sys/class/hwmon/hwmon6 name=asus ==

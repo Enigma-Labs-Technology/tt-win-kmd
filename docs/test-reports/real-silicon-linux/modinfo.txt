@@ -1,0 +1,35 @@
+filename:       /lib/modules/7.0.10-arch1-1/updates/dkms/tenstorrent.ko.zst
+version:        2.9.1-pre
+description:    Tenstorrent AI kernel driver
+license:        GPL
+srcversion:     186DE4EB88742510DB353F7
+alias:          pci:v00001E52d0000B140sv*sd*bc*sc*i*
+alias:          pci:v00001E52d0000401Esv*sd*bc*sc*i*
+alias:          pci:v00001E52d0000FACAsv*sd*bc*sc*i*
+depends:        
+name:           tenstorrent
+retpoline:      Y
+vermagic:       7.0.10-arch1-1 SMP preempt mod_unload 
+sig_id:         PKCS#7
+signer:         DKMS module signing key
+sig_key:        75:20:40:E5:E8:2F:48:D4:FE:64:7A:35:9F:40:B8:F5:8F:8B:0A:BF
+sig_hashalgo:   sha512
+signature:      6D:4E:67:49:A7:0B:A8:CB:1D:AB:87:7B:44:24:C2:08:4C:ED:72:CD:
+		8C:60:85:B0:3B:33:21:5B:47:7F:9A:D4:BF:C3:00:83:37:8C:71:5D:
+		1B:75:23:84:E2:92:2B:D0:6C:A1:EE:0A:35:8A:AC:CF:34:88:7A:20:
+		25:36:EC:CE:9D:32:36:D5:B5:C7:AE:AD:4C:1B:76:77:64:1E:71:A0:
+		20:08:D0:EA:F0:4F:3B:8A:00:62:8A:CB:54:EB:46:F3:EF:1A:BB:17:
+		92:96:89:6E:84:59:82:E0:BC:A3:02:A6:A2:E4:AD:A8:B5:9C:73:1C:
+		18:81:83:2F:A9:28:0B:A6:13:51:24:24:E5:C0:9E:3A:E7:89:45:3C:
+		65:89:11:9A:8B:1F:0E:60:98:37:88:03:0B:1A:AE:06:C4:4A:F0:D4:
+		4D:AF:B1:35:45:C0:AC:8A:7A:C9:88:21:4D:90:20:22:26:24:B2:A4:
+		F4:C7:83:36:8F:90:EC:47:6C:28:3A:5A:3E:9A:E5:92:C0:0A:BB:5D:
+		D8:9D:B6:1F:40:75:97:44:07:EE:81:95:E0:6A:56:CD:50:EE:9F:36:
+		5A:3F:31:83:C9:42:27:7B:EF:9D:20:02:8C:D9:D4:23:96:4A:3E:BC:
+		D8:8D:49:97:2D:67:37:DA:39:05:50:C3:A0:AF:7E:68
+parm:           max_devices:Maximum number of tenstorrent devices (chips) to support. (uint)
+parm:           dma_address_bits:DMA address bits, 0 for automatic. (uint)
+parm:           reset_limit:Maximum number of times to reset device during boot. (uint)
+parm:           auto_reset_timeout:Timeout duration in seconds for M3 auto reset to occur. (byte)
+parm:           power_policy:Enable power policy: low power at probe, re-aggregate on close (default=on). (bool)
+parm:           idle_power_down_grace_ms:Delay in ms between the last fd closing a device and the idle power-down message being sent.  0 sends the message synchronously at close.  Only honored by device classes that opt in via defer_idle_powerdown. (uint)

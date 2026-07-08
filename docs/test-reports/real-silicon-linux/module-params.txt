@@ -1,0 +1,7 @@
+== /sys/module/tenstorrent/parameters ==
+auto_reset_timeout = 10
+dma_address_bits = 0
+idle_power_down_grace_ms = 5000
+max_devices = 32
+power_policy = Y
+reset_limit = 10

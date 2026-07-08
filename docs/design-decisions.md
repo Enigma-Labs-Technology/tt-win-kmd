@@ -300,6 +300,14 @@ regardless of BME or IOMMU state).
   config-space view (outbound NOC TLB 62 at 0xF8...0 + 0x78) to preserve the
   negotiated Max Payload Size across chip resets; wired into RESTORE_STATE and
   POST_RESET between config restore and init_hardware (chardev.c:242,277).
+  **MPS is platform-negotiated, NOT the device max — snapshot, never assume.**
+  Silicon ground truth (`real-silicon-linux/`): host DevCtl @0x78 = 0x515f →
+  MPS **512 B** (encoding 2) even though DevCap advertises 1024; MRRS 4096
+  (encoding 5). The snapshot approach captures whatever the root complex
+  negotiated. The full 4 KiB config reset delta confirms all architected
+  config is byte-identical across a real reset and MPS/MRRS survive *only*
+  because the driver restores them — exactly this save→marker→reset→
+  poll-marker-zero→restore sequence.
 - **MRRS.** `TtBhInitHardware` now sets PCIe DevCtl MRRS to 4096 (encoding 5)
   first, matching `pcie_set_readrq(pdev, MAX_MRRS)` (blackhole.c:626).
 - **ARC watchdog.** SET_WDT_TIMEOUT payload is now `1000 * 10` ms, matching

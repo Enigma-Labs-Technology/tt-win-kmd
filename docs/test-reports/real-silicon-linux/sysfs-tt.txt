@@ -1,0 +1,11 @@
+/sys/class/tenstorrent/tenstorrent!0/tt_aiclk = 800
+/sys/class/tenstorrent/tenstorrent!0/tt_arcclk = 800
+/sys/class/tenstorrent/tenstorrent!0/tt_asic_id = 7B772ECCB9DB2F81
+/sys/class/tenstorrent/tenstorrent!0/tt_axiclk = 960
+/sys/class/tenstorrent/tenstorrent!0/tt_card_type = p150a
+/sys/class/tenstorrent/tenstorrent!0/tt_fw_bundle_ver = 19.6.0.0
+/sys/class/tenstorrent/tenstorrent!0/tt_heartbeat = 5436
+/sys/class/tenstorrent/tenstorrent!0/tt_m3app_fw_ver = 0.22.0.0
+/sys/class/tenstorrent/tenstorrent!0/tt_serial = 0000040331921017
+/sys/class/tenstorrent/tenstorrent!0/tt_therm_trip_count = 0
+/sys/class/tenstorrent/tenstorrent!0/dev = 510:0

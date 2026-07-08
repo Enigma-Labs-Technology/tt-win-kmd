@@ -1,0 +1,6 @@
+Jul 08 09:35:57 omarchy kernel: pcieport 0000:c0:01.1: DPC: containment event, status:0x1f01: unmasked uncorrectable error detected
+Jul 08 09:35:57 omarchy kernel: pcieport 0000:c0:01.1: PCIe Bus Error: severity=Uncorrectable (Fatal), type=Transaction Layer, (Receiver ID)
+Jul 08 09:35:57 omarchy kernel: pcieport 0000:c0:01.1:   device [1022:153e] error status/mask=00000020/00000000
+Jul 08 09:35:57 omarchy kernel: pcieport 0000:c0:01.1:    [ 5] SDES                   (First)
+Jul 08 09:35:57 omarchy kernel: tenstorrent 0000:c1:00.0: AER: can't recover (no error_detected callback)
+Jul 08 09:35:57 omarchy kernel: pcieport 0000:c0:01.1: AER: device recovery failed

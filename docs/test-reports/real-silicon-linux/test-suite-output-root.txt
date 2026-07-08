@@ -1,0 +1,2 @@
+Testing /dev/tenstorrent/0 @ 0000:c1:00.0
+exit: 0

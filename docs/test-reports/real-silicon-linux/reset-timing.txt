@@ -1,0 +1,47 @@
+journal mark: 2026-07-08 09:35:57
+reset start: 1783517757.012952360 (09:35:57)
+reset end:   1783517759.759732853 (09:35:59)
+tt-smi -r exit code: 0
+tt-smi -r wall time: 2.75 s
+
+Poller analysis (reset-poller-samples.txt, ~0.2 s sampling, 180 s window)
+-------------------------------------------------------------------------
+- PCI device NEVER disappeared: sysfs dir, config-space vendor read (0x1e52),
+  and /dev/tenstorrent/0 stayed present in every sample (0 absent samples in
+  872 lines). Caveat: the sampling cadence stretched to 0.61 s exactly at
+  reset onset (1783517757.306 -> .917), so the poller alone cannot exclude a
+  sub-second blip inside that one gap; the in-place conclusion is
+  corroborated by the kernel journal, which contains NO pci remove/rescan
+  and NO tenstorrent re-probe lines after the reset. tt-kmd 2.9.1-pre +
+  tt-smi 3.1.1 perform an IN-PLACE reset, despite tt-smi's "waiting for
+  hotplug removal" message.
+- Telemetry outage: tt_heartbeat reads failed (hb=ERR) for 9 consecutive
+  samples: 1783517757.917 -> 1783517759.560 = 1.64 s outage window
+  (09:35:57.92 -> 09:35:59.56 local).
+- tt-smi -r 0 wall time: 2.75 s total (start 09:35:57.01, exit 0).
+- ARC/firmware reboot confirmed: tt_heartbeat counter RESTARTED from ~0
+  (first post-outage sample: hb=17 at 1783517759.765). Post-reset rate
+  re-derived from the poller itself: (1547-17)/(912.799-759.765) = 9.998 Hz.
+  Back-extrapolation puts ARC restart at ~1783517758.1 = 09:35:58.1, inside
+  the outage window. Poller corroboration: hb=584 @ ...816.456 and hb=586 @
+  ...816.661 (09:36:56), matching a separate manual sysfs read of 585.
+  NOTE on tt-smi heartbeat scale: tt-smi's displayed telemetry heartbeat is
+  raw TIMER_HEARTBEAT / 6 (post-reset snapshot: raw 0x417 = 1047 -> displays
+  174; pre-reset: raw 0x48f8 = 18680 -> displayed 3113). The raw value 1047
+  independently matches the 10 Hz restart at 09:35:58.1.
+- Kernel-side events during reset (dmesg-reset.txt): DPC containment event
+  on root port 0000:c0:01.1 (Uncorrectable Fatal, SDES = Surprise Down),
+  then "tenstorrent 0000:c1:00.0: AER: can't recover (no error_detected
+  callback)" and "AER: device recovery failed". No driver re-probe followed;
+  the device kept working anyway (test suite exit 0 post-reset).
+- 64-byte standard config header byte-identical before/after reset
+  (BARs, COMMAND=0x0406, subsystem IDs preserved). PCI_COMMAND
+  parity-error-response bit (0x40): 0 before, 0 after. Archived evidence:
+  lspci-config-after-reset-header.txt (unprivileged partial); the full
+  4 KiB after-capture (DevCtl MPS/MRRS restore) awaits stage5-after.sh.
+- Firmware anchor UNCHANGED across reset: 19.6.0.0 / M3 0.22.0.0.
+- Post-reset health: tt-smi snapshot normal (gen5 x16, DDR 0x5555 trained,
+  0.74 V / 52 A / 38 W / 50 C), ttkmd_test exit 0 (same 4 unprivileged
+  skips as pre-reset). NO reflash was needed; recovery images stayed unused
+  (fw_pack-19.6.0.fwbundle = anchor-preserving recovery, fw_pack-19.11.0
+  also available; uvx tt-flash 3.10.0 verified working).

@@ -1,0 +1,20 @@
+c1:00.0 Processing accelerators [1200]: Tenstorrent Inc Blackhole [1e52:b140]
+	Subsystem: Tenstorrent Inc p150a [1e52:0040]
+	Control: I/O- Mem+ BusMaster+ SpecCycle- MemWINV- VGASnoop- ParErr- Stepping- SERR- FastB2B- DisINTx+
+	Status: Cap+ 66MHz- UDF- FastB2B- ParErr- DEVSEL=fast >TAbort- <TAbort- <MAbort- >SERR- <PERR- INTx-
+	Latency: 0, Cache Line Size: 64 bytes
+	Interrupts: pin B disabled, MSI(X) routed to IRQ 152
+	IOMMU group: 9
+	Region 0: Memory at 15000000000 (64-bit, prefetchable) [size=512M]
+	Region 2: Memory at 15020000000 (64-bit, prefetchable) [size=1M]
+	Region 4: Memory at 14800000000 (64-bit, prefetchable) [size=32G]
+	Capabilities: <access denied>
+	Kernel driver in use: tenstorrent
+	Kernel modules: tenstorrent
+
+
+# CAVEAT (verified 2026-07-08): the "Interrupts: pin B" line above is WRONG — pciutils 3.15.0 on
+# this host renders INT pin letters off-by-one (config 0x3d = 0x01 = INTA; see pci-sysfs-devnode.txt
+# and lspci-config-header.txt offset 0x3d). Also "MSI(X)" is an ambiguous unprivileged token; the
+# kernel actually uses single-vector plain MSI (/sys/bus/pci/devices/0000:c1:00.0/msi_irqs/152 = msi).
+# Do NOT use this line as ground truth in the Windows comparison; use the root lspci-vvv-root.txt.
