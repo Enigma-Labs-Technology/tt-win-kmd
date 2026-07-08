@@ -58,9 +58,9 @@ byte-identical output).
 |---|---|---|---|---|
 | a install+bind | 20-install-driver.ps1 | **PASS** 2026-07-08 | — | Status OK, Service ttkmd, pkg oem36. Host gauntlet first: HVCI off, /CETCOMPAT (b7a5f74), FACEIT AC disabled — see "Host security gauntlet" below |
 | b info/map/telem (read-only) | ttinfo.exe | **PASS** exit 0 | advancing (in-dump assert) | present-mask 0x1fff; BARs 512M/1M/32G; all values vs GT: exacts exact, lives in range; fw 19.6.0.0 = anchor; 0 WHEA, 0 bugcheck |
-| c TLB + safe reg reads | ttinfo --only tlb | ☐ | ____ | NOC_ID ∈{2,11}: __ |
-| d DMA loopback | ttinfo --only dma | ☐ | ____ | identity probe: __ |
-| e PIN_PAGES | ttinfo --only pin | ☐ | ____ | phys=________ |
+| c TLB + safe reg reads | ttinfo --only tlb | **PASS** exit 0 | advancing (in-test, both paths) | 2M window to ARC (8,0) via TLB-map and open-BAR0 paths; EBUSY/double-free negatives correct |
+| d DMA loopback | ttinfo --only dma | **PASS** exit 0 | advancing | 64K common buffer CPU-verified, bus=0x201a469000 (<2^58); iATU region noc=0x13ffffffffff0000 (inside 4<<58 aperture, top-down) |
+| e PIN_PAGES | ttinfo --only pin | **PASS** exit 0 | 2389 advancing (post-rung) | phys=0x1f6e3ee000; identity-domain probe ALLOWED pinning (HVCI off + FACEIT_IOMMU gone -> 1:1). Note: the "remapping ON" matrix cell is untestable with a test-signed driver — HVCI must be off to load it; guard refusal path is review-validated only |
 | f RESTORE/POST_RESET | ttinfo --reset restore-then-post | ☐ | ____ | result=__, MPS after=__ |
 | g CONFIG_WRITE | ttinfo --reset config-write | ☐ | ____ | stale handle→REMOVED: __ |
 | h ASIC_DMC_RESET | ttinfo --reset asic-dmc | ☐ | ____ | ARC TEST ok: __ |
