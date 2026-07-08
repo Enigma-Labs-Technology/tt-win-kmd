@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $since = Get-Date
 
 if (-not (verifier /query | Select-String -SimpleMatch 'ttkmd.sys')) {
-    Write-Warning 'Verifier is NOT armed for ttkmd.sys — run 30-verifier-arm.ps1 first (recommended).'
+    Write-Warning 'Verifier is NOT armed for ttkmd.sys - run 30-verifier-arm.ps1 first (recommended).'
 }
 
 $card = Get-PnpDevice | Where-Object { $_.InstanceId -like 'PCI\VEN_1E52*' -and $_.Present }
@@ -20,7 +20,7 @@ $card = Get-PnpDevice -InstanceId $card.InstanceId
 $card | Format-List FriendlyName, Status, Problem
 if ($card.Status -ne 'OK') { throw "CHECKPOINT FAIL: device Status=$($card.Status) Problem=$($card.Problem)" }
 
-Write-Host '== Rung b: read-only ttinfo (info/mappings/telemetry — no TLB, no DMA, no reset)...'
+Write-Host '== Rung b: read-only ttinfo (info/mappings/telemetry - no TLB, no DMA, no reset)...'
 & (Join-Path $Drop 'ttinfo.exe')
 $ttinfoExit = $LASTEXITCODE
 Write-Host "ttinfo exit code: $ttinfoExit (0=pass 1=fail 2=no device)"

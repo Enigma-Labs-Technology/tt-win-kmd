@@ -6,8 +6,8 @@
 param([string]$Drop = (Join-Path $PSScriptRoot '..\..\out\Release'))
 $ErrorActionPreference = 'Stop'
 
-if (Confirm-SecureBootUEFI) { throw 'Secure Boot is ON — the test-signed driver cannot load. Disable it in UEFI first (phase 0).' }
-if (-not (bcdedit /enum '{current}' | Select-String 'testsigning\s+Yes')) { throw 'testsigning is OFF — run phase 0 and reboot first.' }
+if (Confirm-SecureBootUEFI) { throw 'Secure Boot is ON - the test-signed driver cannot load. Disable it in UEFI first (phase 0).' }
+if (-not (bcdedit /enum '{current}' | Select-String 'testsigning\s+Yes')) { throw 'testsigning is OFF - run phase 0 and reboot first.' }
 
 $inf = Join-Path $Drop 'ttkmd.inf'
 $cer = Join-Path $Drop 'tt-test.cer'
@@ -30,9 +30,9 @@ Write-Host "Service: $svc"
 if ($card.Status -eq 'OK' -and $svc -eq 'ttkmd') {
     Write-Host '== CHECKPOINT PASS: ttkmd bound and started on the real card.'
 } elseif ($card.Problem -eq 52) {
-    throw 'CHECKPOINT FAIL: Code 52 (signature) — Secure Boot/testsigning/cert-store problem.'
+    throw 'CHECKPOINT FAIL: Code 52 (signature) - Secure Boot/testsigning/cert-store problem.'
 } elseif ($card.Problem -eq 54 -or $card.Problem -eq 12) {
-    throw "CHECKPOINT FAIL: Code $($card.Problem) — DMA-guard block (54) or resource shortfall/BAR4 not granted (12). Check msinfo32 'Kernel DMA Protection' and BIOS Above-4G decoding."
+    throw "CHECKPOINT FAIL: Code $($card.Problem) - DMA-guard block (54) or resource shortfall/BAR4 not granted (12). Check msinfo32 'Kernel DMA Protection' and BIOS Above-4G decoding."
 } else {
     throw "CHECKPOINT FAIL: Status=$($card.Status) Problem=$($card.Problem) Service=$svc"
 }

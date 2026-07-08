@@ -19,7 +19,7 @@ $blv = Get-BitLockerVolume -MountPoint 'C:' -ErrorAction SilentlyContinue
 if ($blv -and $blv.ProtectionStatus -eq 'On') {
     Write-Warning 'BitLocker protection is ON for C:. Suspend it (Suspend-BitLocker -MountPoint C: -RebootCount 2) or have the recovery key in hand BEFORE toggling Secure Boot in firmware.'
 } else {
-    Write-Host 'BitLocker: protection off or not present — Secure Boot change is safe.'
+    Write-Host 'BitLocker: protection off or not present - Secure Boot change is safe.'
 }
 
 # --- Secure Boot / test signing gates ---
@@ -35,7 +35,7 @@ if (-not $tsig) {
     } else {
         Write-Host 'Enabling testsigning (takes effect after reboot)...'
         bcdedit /set '{current}' testsigning on | Out-Null
-        Write-Warning 'testsigning enabled — REBOOT required before driver install.'
+        Write-Warning 'testsigning enabled - REBOOT required before driver install.'
     }
 } else {
     Write-Host 'testsigning: already on.'

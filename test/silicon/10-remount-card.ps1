@@ -22,7 +22,7 @@ if ($hostDev) {
     Write-Host "== Remounting $location to the host..."
     Mount-VMHostAssignableDevice -LocationPath $location
 } else {
-    Write-Host 'No dismounted devices found — card may already be mounted.'
+    Write-Host 'No dismounted devices found - card may already be mounted.'
 }
 
 pnputil /scan-devices | Out-Null
@@ -33,8 +33,8 @@ $pcip = Get-PnpDevice | Where-Object { $_.InstanceId -like 'PCIP\VEN_1E52*' -and
 if ($card) {
     Write-Host '== CHECKPOINT PASS: card is on the host PCI tree:'
     $card | Format-List FriendlyName, InstanceId, Status, Problem
-    if ($card.Problem -eq 28) { Write-Host '(Code 28 = no driver yet — expected before install)' }
+    if ($card.Problem -eq 28) { Write-Host '(Code 28 = no driver yet - expected before install)' }
 } else {
     throw 'CHECKPOINT FAIL: no present PCI\VEN_1E52 device after remount.'
 }
-if ($pcip) { Write-Warning 'A PCIP\VEN_1E52 node is still present — dismount state may linger; verify before install.' }
+if ($pcip) { Write-Warning 'A PCIP\VEN_1E52 node is still present - dismount state may linger; verify before install.' }
