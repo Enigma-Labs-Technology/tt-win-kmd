@@ -22,6 +22,19 @@ if ($blv -and $blv.ProtectionStatus -eq 'On') {
     Write-Host 'BitLocker: protection off or not present - Secure Boot change is safe.'
 }
 
+# --- Anti-cheat / EDR kernel drivers: these veto driver loads BEFORE Code
+# Integrity opens the file (generic errors: 1450 / ACCESS_DENIED, empty CI
+# log, DriverEntry never reached). Observed live: FACEIT_AC.sys blocked the
+# test-signed ttkmd.sys load. ---
+$acNames = 'FACEIT|FACEIT_IOMMU|vgk|BEDaisy|EasyAntiCheat|ESEADriver|atc'
+$acLoaded = driverquery /v /fo csv | ConvertFrom-Csv |
+    Where-Object { $_.'Module Name' -match $acNames -and $_.State -eq 'Running' }
+if ($acLoaded) {
+    $acLoaded | ForEach-Object { Write-Warning "Anti-cheat/EDR kernel driver RUNNING: $($_.'Module Name') ($($_.Path)) - it can block the test-signed driver from loading. Disable for the campaign: sc.exe config $($_.'Module Name') start= disabled, then reboot." }
+} else {
+    Write-Host 'Anti-cheat/EDR kernel drivers: none running.'
+}
+
 # --- Memory Integrity (HVCI): its VTL1 CI policy rejects self-signed test
 # certs with STATUS_ACCESS_DENIED even when testsigning is on ---
 $hvci = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -ErrorAction SilentlyContinue).Enabled
