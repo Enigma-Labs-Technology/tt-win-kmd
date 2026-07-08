@@ -97,17 +97,17 @@ implementation. This is a known functional gap, not a regression.
 
 | nr | IOCTL | Sim status (matrix) | Silicon result | Divergence? |
 |---|---|---|---|---|
-| 0 | GET_DEVICE_INFO | tested | ☐ | |
-| 2 | QUERY_MAPPINGS | tested | ☐ | BAR sizes real vs rig |
-| 3 | ALLOCATE_DMA_BUF | tested | ☐ | |
-| 5 | GET_DRIVER_INFO | tested | ☐ | |
-| 6 | RESET_DEVICE (all flavors) | tested (sim) | ☐ | DD-11/DD-12 first silicon |
-| 7/10 | PIN/UNPIN_PAGES | functional | ☐ | identity-domain guard |
-| 8 | LOCK_CTL | tested | ☐ | |
-| 11-13 | ALLOCATE/FREE/CONFIGURE_TLB | tested | ☐ | |
-| 14 | SET_NOC_CLEANUP | tested | ☐ | |
-| 15 | SET_POWER_STATE | tested (sim no-op) | ☐ | first real FW parse of 0x21 |
-| — | QUERY_TELEMETRY / MAP / UNMAP | tested | ☐ | |
+| 0 | GET_DEVICE_INFO | tested | **PASS** (rung b) | none — BDF/subsys exact |
+| 2 | QUERY_MAPPINGS | tested | **PASS** (rung b) | real BARs 512M/1M/32G vs rig's 4G BAR4 — clamp correct (8 windows) |
+| 3 | ALLOCATE_DMA_BUF | tested | **PASS** (rung d) | none |
+| 5 | GET_DRIVER_INFO | tested | **PASS** (rung b) | none |
+| 6 | RESET_DEVICE (per flavor) | tested (sim) | 0+6 **PASS** (f); 5 **PASS** (h, AER mitigation); 2/4 **D4 contraindicated**; 1 honest-unsupported (D5); 3 not run | D4/D5/D6; OQ-7 filed |
+| 7/10 | PIN/UNPIN_PAGES | functional | **PASS** (rung e, identity domain) | translated-domain refusal untestable with test-signed build (D2 note) |
+| 8 | LOCK_CTL | tested | exercised via soak open/close path | full suite = sim (M5) |
+| 11-13 | ALLOCATE/FREE/CONFIGURE_TLB | tested | **PASS** (rung c) | none |
+| 14 | SET_NOC_CLEANUP | tested | pending ttconform pass | — |
+| 15 | SET_POWER_STATE | tested (sim no-op) | ARC 0x21 (fixed wire format) accepted by real FW on every open/close + probe | first real FW parse — no rejection observed |
+| — | QUERY_TELEMETRY / MAP / UNMAP | tested | **PASS** (rungs b-e; field-for-field vs tt-smi GT) | D3 (m3app/CM fw fields not in struct) |
 | 9 | MAP_PEER_BAR | not-started | n/a | single card |
 | 16 | EXPORT_TLB_DMABUF | not-started | n/a | no Windows dma-buf |
 

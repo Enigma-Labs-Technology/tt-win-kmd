@@ -86,3 +86,24 @@ in from the analysis (chardev.c handler) before M1 code.
 `ttwin_compat` exposes tt_open/tt_ioctl/tt_mmap/tt_munmap/tt_close over the
 above IOCTLs with the Linux request constants and structs unchanged; `ttconform`
 exercises every implemented IOCTL through it. See docs/tt-umd-porting-notes.md.
+
+## Real-silicon status (M7, Blackhole p150a, 2026-07-08)
+
+Silicon validation per `docs/test-reports/real-silicon.md` (ladder rungs a-h,
+Verifier 0x9BB active; firmware anchor 19.6.0.0 = Linux ground-truth capture):
+
+| nr | Name | Silicon status |
+|---|---|---|
+| 0 | GET_DEVICE_INFO | **silicon-tested** (rung b; real BDF/subsys exact) |
+| 1 | GET_HARVESTING | silicon-tested (stub parity, rung b negatives) |
+| 2 | QUERY_MAPPINGS | **silicon-tested** (real BARs 512M/1M/32G — OQ-1 confirmed) |
+| 3 | FREE/ALLOCATE_DMA_BUF | **silicon-tested** (rung d; 64K loopback + iATU) |
+| 5 | GET_DRIVER_INFO | **silicon-tested** (rung b) |
+| 6 | RESET_DEVICE | mixed by flavor: RESTORE_STATE(0) + POST_RESET(6) **silicon-tested** (rung f); ASIC_DMC_RESET(5) **silicon-tested** (rung h, under AER mitigation, marker-cleared proof); CONFIG_WRITE(2)/ASIC_RESET(4) **CONTRAINDICATED on real BH** (D4/OQ-7 — trigger wedges the link); RESET_PCIE_LINK(1) honest STATUS-unsupported on boards without ACPI _RST (D5, DD-11); USER_RESET(3) not silicon-run |
+| 7 | PIN_PAGES | **silicon-tested** (rung e, identity domain; translated-domain refusal is review-validated — untestable with a test-signed build, HVCI must be off) |
+| 10 | UNPIN_PAGES | **silicon-tested** (rung e teardown + negatives) |
+| 11-13 | ALLOCATE/FREE/CONFIGURE_TLB | **silicon-tested** (rung c, both map paths + negatives) |
+| 14 | SET_NOC_CLEANUP | sim-tested (M6); silicon pending a ttconform pass |
+| 15 | SET_POWER_STATE | ARC POWER_SETTING (fixed wire format, DD-12) accepted by real FW on every open/close + probe-time aggregate; explicit ioctl path sim-tested (M5) |
+| 9, 16 | MAP_PEER_BAR / EXPORT_TLB_DMABUF | deferred by design (unchanged) |
+| ext | QUERY_TELEMETRY / MAP / UNMAP | **silicon-tested** (rungs b-e; telemetry cross-checked field-for-field vs tt-smi ground truth) |

@@ -155,3 +155,35 @@ under Verifier with the tt-flash/Linux recovery path armed; the report's
 divergence log (D1) tracks the observed Windows behavior, and this OQ resolves
 (or a precise fix is filed) from that run. Do NOT assume Linux's in-place
 semantics on Windows.
+
+## OQ-7: CONFIG_WRITE/ASIC_RESET interface-timer trigger wedges real Blackhole — upstream question
+
+**Question:** `pcie_timer_interrupt` (config writes 0x934=0x1, 0x930=0x11 —
+the trigger behind RESET_DEVICE flavors CONFIG_WRITE(2) and, with the marker,
+ASIC_RESET(4)) hard-wedged a real p150a on first use: link down, no autonomous
+retrain, endpoint absent from the bus until PERST# (cold power cycle). Is this
+flavor expected to work on Blackhole silicon, or is it Wormhole-era/lab-only?
+
+**Evidence:** M7 ladder rung g (`real-silicon.md` D4): trigger delivered
+(result=0), chip reset (telemetry restarted), then link permanently down;
+restore correctly refused (vendor read FFFF); parent-port restart could not
+revive it; warm reboot recovered enumeration but the controller stayed
+marginal and later took the host down (D6, 0x124). By contrast the
+DMC-coordinated flavor (5) resets and retrains cleanly (rung h). The Linux
+ground-truth capture never exercised flavors 2/4 (tt-smi uses the DMC path),
+and tt-kmd's own hardware tests don't cover them on BH.
+
+**Hypotheses (ranked):**
+1. The interface-timer reset hard-resets the DWC PCIe controller without
+   firmware coordinating link re-training — fine on the rig (fake reset),
+   lethal on silicon unless something re-runs the PCIe init sequence.
+   Firmware 19.6.0.0 does not do so autonomously. **(most likely)**
+2. Host/root-port specific: the AMD port gives up after surprise-down without
+   DPC recovery; other platforms might retrain.
+
+**Isolation:** `TtPcieTimerInterrupt` (reset.c) / `TtBhTimerInterrupt`
+(blackhole.c). No code change made — parity with Linux is preserved; the
+flavors are operationally contraindicated on real BH (ladder + matrix note).
+
+**Status:** OPEN — needs upstream/Tenstorrent clarification whether flavors
+2/4 are supported on Blackhole silicon at all.
