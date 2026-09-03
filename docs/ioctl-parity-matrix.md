@@ -34,6 +34,16 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | -EOVERFLOW | STATUS_BUFFER_OVERFLOW |
 | -ENOTTY (bad ioctl nr) | STATUS_INVALID_DEVICE_REQUEST |
 
+**Process ownership (DD-15):** MAP, UNMAP, PIN_PAGES and UNPIN_PAGES are
+honoured only from the process that opened the handle (STATUS_ACCESS_DENIED
+otherwise); a process-exit callback releases a dying process's views and
+locked pages in its own context, so handles duplicated into other processes
+cannot leave locked pages behind or unmap from the wrong address space.
+
+**DMA-buffer ceiling (DD-17):** ALLOCATE_DMA_BUF fails with
+STATUS_QUOTA_EXCEEDED once a device's outstanding DMA-buffer memory would
+exceed `Parameters\DmaBufferLimitMiB` (default 4096, 0 = unlimited).
+
 **Parity status legend:** `not-started` → `stub` → `functional` → `tested`.
 
 ## Linux ioctls
@@ -44,10 +54,10 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | 1 | GET_HARVESTING | `0x80FA2004` | no struct; Linux has NO handler — falls to default -EINVAL (chardev.c:631-632, 694-696) | BUFFERED | -EINVAL → STATUS_INVALID_PARAMETER | **tested** (stub parity asserted by ttinfo) |
 | 2 | QUERY_MAPPINGS | `0x80FA2008` | `tenstorrent_query_mappings` (8/N×24/8+flex) | BUFFERED | packed UC/WC pairs for existing BARs; min(count,valid) copied + zero-fill (memory.c:393-406) | **tested** (M1, incl. count 0/2/6/16) |
 | 3 | ALLOCATE_DMA_BUF | `0x80FA200C` | `tenstorrent_allocate_dma_buf` (24/40/64) | BUFFERED | WdfCommonBuffer; validation order per memory.c:439-458; iATU-before-free | **tested** (M3) |
-| 4 | FREE_DMA_BUF | `0x80FA2010` | `tenstorrent_free_dma_buf` (upstream 2.10.0+) | BUFFERED | upstream gained a real handler in 2.10.0 (`ioctl_free_dma_buf`); Windows still returns -EINVAL and frees buffers at handle close. tt-umd never issues it (OQ-9) | **stub** (behaviour drift vs 2.11.0) |
+| 4 | FREE_DMA_BUF | `0x80FA2010` | empty in/out structs upstream | BUFFERED | dispatched upstream since 2.10.0 but `ioctl_free_dma_buf` still returns -EINVAL (memory.c:565-573, 2.11.0); Windows answers the same -EINVAL. Early release is the Windows-private `FREE_DMA_BUF_EX` below | **tested** (M3 stub parity) |
 | 5 | GET_DRIVER_INFO | `0x80FA2014` | `tenstorrent_get_driver_info` (4/12/16) | BUFFERED | baseline | **tested** (M1) |
 | 6 | RESET_DEVICE | `0x80FA2018` | `tenstorrent_reset_device` (8/8/16) | BUFFERED | 7-flavor dispatch; flavors 2 (CONFIG_WRITE) and 4 (ASIC_RESET) are refused on physical devices (DD-14, silicon D4 wedge) and kept only for the all-zero-subsystem ttsim/QEMU model; out.result=!ok; gen-bump → STATUS_DEVICE_REMOVED on stale handles; needs_hw_init window; VMA-zap (DD-9) | **tested** (M4) |
-| 7 | PIN_PAGES | `0x80FA201C` | `tenstorrent_pin_pages` (24/8/32); extended out (16) via output_size_bytes | BUFFERED | MmProbeAndLockPages + PFN-contiguity (direct path); READ_ONLY→NOT_SUPPORTED (no driver IOMMU domain, DD-8) | **functional** (M3; direct path tested, RO negative) |
+| 7 | PIN_PAGES | `0x80FA201C` | `tenstorrent_pin_pages` (24/8/32); extended out (16) via output_size_bytes | BUFFERED | **DD-16:** a range inside a MAP view of one of the handle's DMA buffers is backed by that buffer (no page locking, bus address valid in any DMA domain; the tt-umd sysmem path). Otherwise MmProbeAndLockPages + PFN-contiguity (direct path); READ_ONLY→NOT_SUPPORTED (no driver IOMMU domain, DD-8) | **functional** (M3; direct path tested, RO negative) |
 | 8 | LOCK_CTL | `0x80FA2020` | `tenstorrent_lock_ctl` (12/4/16) | BUFFERED | 64 locks; ACQUIRE_BLOCKING = cancellable pended request (manual WDFQUEUE); stale-gen/detached waiter → STATUS_DEVICE_REMOVED; CancelSynchronousIo → STATUS_CANCELLED | **tested** (M5) |
 | 9 | MAP_PEER_BAR | `0x80FA2024` | `tenstorrent_map_peer_bar` (24/16/40) | BUFFERED | `peer_fd` (u32) carries a Windows HANDLE value of the peer device file; resolved via ObReferenceObjectByHandle — 64-bit handle truncation concern, see OQ (to file) | not-started |
 | 10 | UNPIN_PAGES | `0x80FA2028` | `tenstorrent_unpin_pages` (24/0/24) | BUFFERED | exact VA+size match; MmUnlockPages dirties write-locked pages | **functional** (M3) |
@@ -65,6 +75,7 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 |---|---|---|---|---|
 | IOCTL_TENSTORRENT_MAP | `0x80FA2400` | Map a BAR range/DMA buf/TLB window into caller VA (token + byte offset + length → user VA) | `mmap(fd, offset)` | **tested** (M3, DD-8) |
 | IOCTL_TENSTORRENT_UNMAP | `0x80FA2404` | Unmap a prior MAP by VA | `munmap` | **tested** (M3, DD-8) |
+| IOCTL_TENSTORRENT_FREE_DMA_BUF_EX | `0x80FA2410` | Release one DMA buffer slot before handle close; STATUS_DEVICE_BUSY while a MAP view or a backed PIN_PAGES references it (DD-16) | none (Linux frees at close) | **functional** (M8; ttinfo `--only dma`, guest rerun pending) |
 | IOCTL_TENSTORRENT_QUERY_TELEMETRY | `0x80FA2408` | hwmon-equivalent telemetry (exact Linux names/units/scaling; present-mask) | sysfs/hwmon nodes | **tested** (M5, DD-10) |
 | IOCTL_TENSTORRENT_SET_CLIENT_FLAGS | `0x80FA2408` | Declares power-aware client immediately after open | `open(..., O_APPEND)` | design-pending (analysis §03) |
 | IOCTL_TENSTORRENT_QUERY_STABLE_ID | `0x80FA240C` | ASIC-ID-based stable identity | `/dev/tenstorrent/by-id/*` udev symlinks | design-pending (analysis §01 naming scheme) |

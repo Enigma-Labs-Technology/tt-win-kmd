@@ -26,11 +26,13 @@ Tenstorrent.
 | BAR / TLB-window / DMA-buffer mappings (`MAP`/`UNMAP`) | Implemented, tested (10k-cycle soak under Driver Verifier) and on a p150a |
 | TLB allocate/free/configure | Implemented, silicon tested |
 | DMA buffers (`ALLOCATE_DMA_BUF`, up to 256 MiB, iATU-mapped) | Implemented, silicon tested |
-| `PIN_PAGES` / `UNPIN_PAGES` | Implemented for physically contiguous memory (driver DMA buffers); refused in a DMA-remapped (IOMMU) domain |
+| `PIN_PAGES` / `UNPIN_PAGES` | Implemented. Views of the handle's own DMA buffers pin without page locking and work in any DMA domain (DD-16); arbitrary user memory needs contiguous pages and an identity DMA domain |
 | Resource locks (`LOCK_CTL`), power state, NOC cleanup | Implemented, tested on ttsim/QEMU |
 | Reset (`RESET_DEVICE`) | Flavors 0, 3, 5, 6 available; 1 (PLDR) needs platform support the p150a lacks; **2 and 4 are refused on real hardware** because they wedged the card (DD-14) |
 | `SMC_MSG` (new in tt-kmd 2.11.0) | ABI carried, returns `STATUS_NOT_SUPPORTED` (OQ-8) |
-| `MAP_PEER_BAR`, `EXPORT_TLB_DMABUF`, `FREE_DMA_BUF` | Not implemented (OQ-9); tt-umd does not use them |
+| Process ownership, DMA ceiling | Handles are bound to the opening process, a process-exit callback releases leftovers (DD-15); per-device DMA-buffer cap, registry-tunable (DD-17) |
+| `FREE_DMA_BUF_EX` (Windows-only) | Implemented: releases a DMA buffer before handle close; refused while mapped or pinned (DD-16) |
+| `MAP_PEER_BAR`, `EXPORT_TLB_DMABUF`, `FREE_DMA_BUF` | Not implemented (upstream's `FREE_DMA_BUF` is itself a stub); tt-umd does not use them (OQ-9) |
 | Wormhole / Grayskull | Not supported (Blackhole only) |
 
 Per-request detail is in `docs/ioctl-parity-matrix.md`; the silicon results are

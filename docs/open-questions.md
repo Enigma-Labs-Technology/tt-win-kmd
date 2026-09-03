@@ -201,13 +201,15 @@ flushes in-flight user messages before the driver's own synchronous messages
 (`TtBhSendArcMessage`). Kernel-side work that must be built and exercised on
 the rig before it ships.
 
-## OQ-9: FREE_DMA_BUF, MAP_PEER_BAR and EXPORT_TLB_DMABUF remain unimplemented — OPEN (low priority)
+## OQ-9: FREE_DMA_BUF, MAP_PEER_BAR and EXPORT_TLB_DMABUF — RESOLVED for the Windows use, upstream gap noted
 
-`FREE_DMA_BUF` gained a real handler upstream in 2.10.0; Windows still answers
--EINVAL and releases buffers at handle close. tt-umd never calls it, and the
-Windows sysmem path (DD-13) allocates per handle, so nothing is blocked.
-`MAP_PEER_BAR` needs a second device and a Windows-native peer identity;
-`EXPORT_TLB_DMABUF` has no Windows equivalent. Revisit when a consumer appears.
+Upstream 2.11.0 dispatches `FREE_DMA_BUF` but `ioctl_free_dma_buf` still
+returns -EINVAL and the request's in/out structures are empty, so it cannot
+name a slot; Windows answers the same -EINVAL (exact parity). Early release on
+Windows is provided by the private `FREE_DMA_BUF_EX` (DD-16), which tt-kmd-lib
+uses for sysmem buffers. `MAP_PEER_BAR` needs a second device and a
+Windows-native peer identity; `EXPORT_TLB_DMABUF` has no Windows equivalent.
+Both stay unimplemented until a consumer appears.
 
 ## OQ-10: Sysmem capacity on Windows is capped at 256 MiB per channel — OPEN
 
@@ -217,6 +219,6 @@ even if the cap were lifted. Options: (a) a boot-start reservation of N x 1 GiB
 common buffers handed out to the first opener (the Linux hugepage analogue);
 (b) a registry parameter for the reservation size; (c) keep 256 MiB and let
 tt-metal size its command queues from the reported channel size. (c) is what
-ships now. Measure whether tt-metal workloads on a p150a are limited by it
-before doing (a).
+ships now, with DD-17's per-device ceiling bounding the total. Measure whether
+tt-metal workloads on a p150a are limited by it before doing (a).
 

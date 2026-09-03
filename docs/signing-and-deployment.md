@@ -31,10 +31,11 @@ a **Partner Center hardware program account** registered with that certificate.
 
 Runbook (one submission per release):
 
-1. Build the release package with Driver Code Analysis:
-   `build.ps1 -Configuration Release -Test`. The Release configuration does not
-   compile the debug-only IOCTLs (`TT_DEBUG_INTERFACES` is Debug-only in
-   `ttkmd.vcxproj`).
+1. Build the release package with Driver Code Analysis and Static Driver
+   Verifier: `build.ps1 -Configuration Release -Test -Sdv`. The Release
+   configuration does not compile the debug-only IOCTLs (`TT_DEBUG_INTERFACES`
+   is Debug-only in `ttkmd.vcxproj`). SDV is not required for attestation but
+   it is the standard bar for a KMDF driver; the run takes tens of minutes.
 2. Run `InfVerif /h /w out\Release\ttkmd.inf` from the EWDK; attestation
    rejects INF errors. `PnpLockdown=1` stays in the INF.
 3. Sign the binaries with the EV certificate (the test signature is replaced):
@@ -65,8 +66,12 @@ Constraints to keep for attestation compatibility:
 
 - `PnpLockdown=1` in the INF, no `CopyFiles` outside the driver store.
 - No dependence on test-signing behaviour, no debug IOCTLs in Release.
-- The driver requests CET compatibility and links with `/INTEGRITYCHECK`;
-  keep both, HVCI-enabled machines are the default target.
+- The driver requests CET compatibility and links with `/INTEGRITYCHECK`
+  (also required for its process-exit callback, DD-15); keep both,
+  HVCI-enabled machines are the default target.
+- Before submitting, run `ttinfo --only dma,pin` and `ttinfo --multiproc 4`
+  on the rig and on the card: they cover the DMA ceiling, the backed-pin path
+  and the process-ownership guard that this release depends on.
 
 ## Optional: WHQL
 

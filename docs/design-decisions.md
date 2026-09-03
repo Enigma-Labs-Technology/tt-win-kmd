@@ -382,3 +382,72 @@ Linux, reports failure on Windows silicon instead of hanging the machine.
 `ASIC_DMC_RESET` (5), `USER_RESET` (3), `RESTORE_STATE` (0) and `POST_RESET`
 (6) are unchanged.
 
+## DD-15: Handles are bound to the opening process; a process-exit callback releases leftovers
+
+**Context.** MAP creates user views with `MmMapLockedPagesSpecifyCache` and
+PIN_PAGES locks pages with `MmProbeAndLockPages`, both charged to the calling
+process. Cleanup runs at the last close of the file object, which a handle
+duplicated or inherited into another process moves to that process: the unmap
+would then run in the wrong address space (bugcheck) and, if the creator has
+already exited, its locked pages trip `DRIVER_LEFT_LOCKED_PAGES_IN_PROCESS`
+(0xCB), which is what the earlier fail-closed branch observed under Verifier.
+
+**Decision.** Each file context records its creator (`PsGetCurrentProcess()`
+at create, referenced). The caller-context IOCTLs (MAP, UNMAP, PIN_PAGES,
+UNPIN_PAGES) are refused with `STATUS_ACCESS_DENIED` from any other process.
+The driver registers `PsSetCreateProcessNotifyRoutineEx` (so the image links
+with `/INTEGRITYCHECK`); on process exit, in that process's own context and
+before its address space is torn down, it walks a driver-global device list
+and releases every mapping and pinning of handles that process opened. DMA
+buffers and TLB windows stay with the file object and are released by the
+eventual cleanup from any context. `TtDestroyUserMapping` still attaches to
+the creator when the caller is elsewhere, which covers a duplicated-handle
+close while the creator is alive; the reset zap uses the same routine.
+
+**Consequences.** tt-umd is unaffected: it opens non-inheritable handles and
+never duplicates them. A registration failure is logged and the driver keeps
+working without the safety net. Lock order for the callback is device list,
+reset resource (shared), file list, file lock, the same as cleanup and zap.
+
+## DD-16: PIN_PAGES of a DMA-buffer view is backed by the buffer; FREE_DMA_BUF_EX
+
+**Context.** tt-umd's Windows sysmem path allocates channels with
+ALLOCATE_DMA_BUF, maps them, and pins the views with PIN_PAGES so the NOC
+aperture is allocated bottom-up (DD-13). The direct PIN_PAGES path hands raw
+PFNs to the iATU, which is only valid in an identity DMA domain, so both INFs'
+DMA-remapping opt-in and Kernel DMA Protection made sysmem fail on exactly the
+machines the release targets. Linux's FREE_DMA_BUF is still a stub upstream
+(2.11.0 `ioctl_free_dma_buf` returns -EINVAL and its payload has no fields),
+so buffers could only be released at handle close.
+
+**Decision.** PIN_PAGES first looks for a MAP view of one of the handle's own
+DMA buffers that contains the range. If found, no pages are probed or locked:
+the device address is the common buffer's logical address plus the offset,
+which is valid in any DMA domain, and the pinning records the backing buffer.
+Only ranges outside such views take the direct path and its identity-domain
+requirement. A Windows-private `IOCTL_TENSTORRENT_FREE_DMA_BUF_EX`
+(`{buf_index, reserved}`) releases one slot early, refused with
+`STATUS_DEVICE_BUSY` while a view or a backed pinning references it.
+
+**Consequences.** Sysmem works with memory integrity and Kernel DMA
+Protection on, and the sysmem path never locks user pages. tt-kmd-lib's
+`tt_free_dma_buf` uses the new request on Windows and reports -ENOTSUP on
+Linux. Cleanup order is unchanged: views, pinnings, then buffers.
+
+## DD-17: Per-device ceiling on DMA-buffer memory
+
+**Context.** DMA buffers are nonpaged, physically contiguous common buffers of
+up to 256 MiB, 256 slots per handle, available to every user the INF admits.
+Linux has the same exposure; on Windows it is a kernel-pool exhaustion vector
+for an ordinary user.
+
+**Decision.** `TT_DEVICE_CONTEXT.DmaBufBytes` tracks outstanding buffer bytes
+per device with interlocked arithmetic; ALLOCATE_DMA_BUF fails with
+`STATUS_QUOTA_EXCEEDED` when the total would exceed the limit read once at
+DeviceAdd from the service's `Parameters\DmaBufferLimitMiB` value (default
+4096, 0 disables the check).
+
+**Consequences.** Four 1 GiB-equivalent channels' worth of buffers fit under
+the default. `ttinfo --only dma` exercises the boundary and skips when the
+limit is disabled or the host cannot supply the contiguous memory.
+

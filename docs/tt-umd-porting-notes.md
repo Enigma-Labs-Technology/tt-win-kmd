@@ -44,14 +44,22 @@ raw PFNs to the iATU in a DMA-remapped domain. The Windows path is:
 
 Consequences for the driver:
 
-- `PIN_PAGES` must accept a user VA that is a `MAP` view of a common buffer
-  (`MmProbeAndLockPages` on driver-created user mappings). This is the M3
-  behaviour that passed the silicon rung e test.
+- `PIN_PAGES` recognises a range inside a `MAP` view of one of the handle's
+  own DMA buffers and backs the pinning with that buffer (DD-16): no pages are
+  locked and the device address is the common buffer's bus address, valid
+  with DMA remapping on or off. Only ranges outside such views take the
+  direct, identity-domain-only path.
 - A 1 GiB channel needs a contiguous 1 GiB common buffer. That is only
   realistic if the driver reserves it at boot; raising `TT_MAX_DMA_BUF_SIZE`
-  and adding a boot-time reservation is tracked as OQ-10.
-- Buffers are released at handle close. `FREE_DMA_BUF` is not implemented
-  (OQ-9); tt-umd never calls it.
+  and adding a boot-time reservation is tracked as OQ-10. The per-device
+  ceiling (DD-17, default 4 GiB) bounds the total.
+- Buffers are released early with the Windows-private `FREE_DMA_BUF_EX`
+  (tt-kmd-lib `tt_free_dma_buf`), refused while a view or a backed pinning
+  references the buffer, and otherwise at handle close. Linux's `FREE_DMA_BUF`
+  is still a stub upstream, so `tt_free_dma_buf` reports -ENOTSUP there.
+- `MAP`, `UNMAP`, `PIN_PAGES` and `UNPIN_PAGES` are only honoured from the
+  process that opened the handle (DD-15). tt-kmd-lib opens non-inheritable
+  handles, so this never triggers in tt-umd.
 
 ## What tt-umd does not do on Windows
 

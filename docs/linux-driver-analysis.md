@@ -6,7 +6,8 @@
 > request, `SMC_MSG` (nr 17, `struct tenstorrent_smc_msg`, 48 bytes); no
 > existing structure changed (`docs/abi-ground-truth.txt` regenerated). Behaviour
 > deltas worth knowing when reading the cited line numbers below: `FREE_DMA_BUF`
-> now has a handler (`memory.c ioctl_free_dma_buf`); ARC messaging is serialized
+> is dispatched to `memory.c ioctl_free_dma_buf`, which still returns -EINVAL
+> (the structures are empty); ARC messaging is serialized
 > through a per-device `arc_msg_mutex` and gained the asynchronous per-fd pump
 > (`msgqueue.c arc_msg_pump`); `SET_POWER_STATE` propagates ARC errors; a
 > `tlb_mutex` breaks an mmap_lock deadlock cycle; remove-time fd cleanup is
