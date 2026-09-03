@@ -7,7 +7,7 @@
 set -u
 BDF=0000:c1:00.0
 OUT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEST=/home/alex/tt-kmd/test/ttkmd_test
+TEST=~/tt-kmd/test/ttkmd_test
 
 [ "$EUID" -eq 0 ] || { echo "run with sudo"; exit 1; }
 

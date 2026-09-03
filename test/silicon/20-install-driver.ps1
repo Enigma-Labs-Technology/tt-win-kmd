@@ -9,7 +9,9 @@ $ErrorActionPreference = 'Stop'
 if (Confirm-SecureBootUEFI) { throw 'Secure Boot is ON - the test-signed driver cannot load. Disable it in UEFI first (phase 0).' }
 if (-not (bcdedit /enum '{current}' | Select-String 'testsigning\s+Yes')) { throw 'testsigning is OFF - run phase 0 and reboot first.' }
 
-$inf = Join-Path $Drop 'ttkmd.inf'
+# A Debug drop carries ttkmd-test.inf, a Release drop ttkmd.inf (DD-18).
+$inf = Join-Path $Drop 'ttkmd-test.inf'
+if (-not (Test-Path $inf)) { $inf = Join-Path $Drop 'ttkmd.inf' }
 $cer = Join-Path $Drop 'tt-test.cer'
 if (-not (Test-Path $inf) -or -not (Test-Path $cer)) { throw "Driver drop incomplete at $Drop" }
 

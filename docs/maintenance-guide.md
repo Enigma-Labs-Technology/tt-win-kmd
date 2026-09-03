@@ -55,9 +55,11 @@ affected milestone's acceptance tests in the VM; only then set `tested` again.
 
 Upstream driver version lives in `dkms.conf`/`module.h` (see open question on the
 authoritative source in `docs/analysis/open-questions-raw.md`). The port carries it
-in `GET_DRIVER_INFO` out fields (`driver_version_major/minor/patch`) — keep these
-equal to the upstream tag being tracked, and bump `DriverVer` via stampinf
-automatically at build.
+in `src/driver/ttkmd-version.props`, the single source for the `TT_VERSION_*`
+definitions (`GET_DRIVER_INFO` out fields `driver_version_major/minor/patch`),
+the `ttkmd.sys` VERSIONINFO resource and the INF `DriverVer` stamp (DD-18).
+Keep it equal to the upstream tag being tracked; bump `Revision` for a
+Windows-only respin of the same upstream version.
 
 ## 6. Rebaseline checklist (copy into the PR description)
 

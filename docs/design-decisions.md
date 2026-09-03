@@ -451,3 +451,36 @@ DeviceAdd from the service's `Parameters\DmaBufferLimitMiB` value (default
 the default. `ttinfo --only dma` exercises the boundary and skips when the
 limit is disabled or the host cannot supply the contiguous memory.
 
+## DD-18: Release package binds the p150a only; test package is a separate Debug-only INF; KMDF 1.33
+
+**Linux behavior.** `module.c` binds every Tenstorrent device id (Grayskull,
+Wormhole, Blackhole) and the per-chip vtable sorts out the rest; there is one
+module and no packaging distinction between test and production.
+
+**Windows decision.**
+
+- `ttkmd.inf` (Release configuration, the package that gets signed) matches
+  `PCI\VEN_1E52&DEV_B140&SUBSYS_00401E52` only: the Blackhole p150a. Other
+  Blackhole boards share `DEV_B140` but have never been near this driver, and
+  the p300 presents two functions that nothing here handles; a driver that
+  binds them would start, then fail in ways users cannot diagnose. Wormhole
+  (`DEV_401E`) and Grayskull are not matched because the driver has no code
+  for them. Widening the match is a one-line INF change once a board has
+  been through the silicon ladder.
+- `ttkmd-test.inf` (Debug configuration only) additionally matches the
+  ttsim/QEMU model (all-zero subsystem identity) and the hardware-free
+  `ROOT\TTKMD_SOFT` load-test node. Shipping the soft node in the signed
+  package would let anyone instantiate a fake device against the production
+  driver, so it never leaves the test package.
+- The driver targets KMDF 1.33, which is in-box on every Windows 11 build,
+  matching the INF's `10.0...22000` floor. KMDF 1.35 needs 24H2 and would
+  install but fail to start on 21H2 through 23H2.
+- The version lives in one place, `src/driver/ttkmd-version.props`, and feeds
+  the `TT_VERSION_*` definitions (`GET_DRIVER_INFO`), the VERSIONINFO
+  resource and the INF `DriverVer` stamp, so the three cannot disagree.
+
+**Consequences.** `build.ps1 -Configuration Debug` produces the test package
+and `Release` the p150a package; `install-driver.ps1` picks whichever it
+finds and creates the soft node only for the test package. Attestation
+submissions take the Release package only.
+

@@ -1,14 +1,27 @@
-# In-guest: trust the test cert, install the driver package, create the soft devnode.
-# Usage (from C:\tt\drop containing ttkmd.sys/.inf/.cat, tt-test.cer, devgen.exe):
+# In-guest / lab-host: trust the test cert and install the driver package.
+# Usage (from a drop directory containing ttkmd.sys, the INF, ttkmd.cat and
+# tt-test.cer; devgen.exe is needed only for the soft device):
 #   powershell -ExecutionPolicy Bypass -File install-driver.ps1
+#
+# A Debug drop carries ttkmd-test.inf (ttsim/QEMU model + ROOT\TTKMD_SOFT);
+# a Release drop carries ttkmd.inf (p150a only). The soft load-test node is
+# created only when the test package is present.
 $ErrorActionPreference = 'Stop'
 $drop = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 certutil -addstore -f Root "$drop\tt-test.cer" | Out-Null
 certutil -addstore -f TrustedPublisher "$drop\tt-test.cer" | Out-Null
 
-pnputil /add-driver "$drop\ttkmd.inf" /install
+$testInf = Join-Path $drop 'ttkmd-test.inf'
+$inf = if (Test-Path $testInf) { $testInf } else { Join-Path $drop 'ttkmd.inf' }
+Write-Host "Installing $inf"
+pnputil /add-driver "$inf" /install
 if ($LASTEXITCODE -ne 0) { throw "pnputil /add-driver failed: $LASTEXITCODE" }
+
+if ($inf -ne $testInf) {
+    Write-Host 'Release package installed (no soft device in this package).'
+    exit 0
+}
 
 # Soft devnode for hardware-free load testing (M0 acceptance).
 # devgen.exe ships in the WDK (Tools\10.0.26100.0\x64) and is copied into the drop.

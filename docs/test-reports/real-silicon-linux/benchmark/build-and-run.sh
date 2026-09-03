@@ -6,6 +6,6 @@
 set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ioctl.h lives in the tt-kmd test dir; adjust if your checkout is elsewhere.
-INC="${TTKMD_TEST_DIR:-/home/alex/tt-kmd/test}"
+INC="${TTKMD_TEST_DIR:-~/tt-kmd/test}"
 g++ -std=c++17 -O2 -Wall -I"$INC" "$HERE/ttkmd_bench.cpp" -o "$HERE/ttkmd_bench"
 "$HERE/ttkmd_bench" "$@"

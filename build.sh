@@ -42,7 +42,7 @@ powershell.exe "${PS_ARGS[@]}"
 OUT="$REPO_DIR/out/$CONFIG"
 mkdir -p "$OUT"
 SRC="$STAGE_WSL/src/driver/x64/$CONFIG"
-find "$SRC" \( -name 'ttkmd.sys' -o -name 'ttkmd.inf' -o -name '*.cat' -o -name 'ttkmd.pdb' -o -name 'tt-test.cer' \) \
+find "$SRC" \( -name 'ttkmd.sys' -o -name '*.inf' -o -name '*.cat' -o -name 'ttkmd.pdb' -o -name 'tt-test.cer' \) \
     -exec cp -v {} "$OUT/" \;
 cp -v "$STAGE_WSL/src/tests/ttinfo/x64/$CONFIG/ttinfo.exe" "$OUT/" 2>/dev/null || true
 cp -v "$STAGE_WSL/src/tests/ttconform/x64/$CONFIG/ttconform.exe" "$OUT/" 2>/dev/null || true

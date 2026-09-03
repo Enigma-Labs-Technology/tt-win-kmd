@@ -1,6 +1,6 @@
 # 13. tt-umd Consumer ABI — the de facto userspace contract a Windows shim must satisfy
 
-All paths in this section are relative to the **tt-umd** repo (`/home/alex/tt-windowsport/tt-umd`) unless prefixed otherwise. This section catalogs every OS-touching call site in tt-umd's device-access layer: which ioctls it issues (and in what order), how it discovers devices, every mmap it performs, hugepage usage, sysfs/procfs reads, fd/signal lifecycle assumptions, and threading assumptions. Together these define the ABI surface a Windows KMDF driver + user-mode shim must reproduce.
+All paths in this section are relative to the **tt-umd** repo (`~/tt-windowsport/tt-umd`) unless prefixed otherwise. This section catalogs every OS-touching call site in tt-umd's device-access layer: which ioctls it issues (and in what order), how it discovers devices, every mmap it performs, hugepage usage, sysfs/procfs reads, fd/signal lifecycle assumptions, and threading assumptions. Together these define the ABI surface a Windows KMDF driver + user-mode shim must reproduce.
 
 ## Scope
 

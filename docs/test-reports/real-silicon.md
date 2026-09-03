@@ -1,5 +1,8 @@
 # Real-Silicon Bring-Up Report — Blackhole p150a (first run on hardware)
 
+> Board serial, ASIC id and host name are redacted in this public copy of the report.
+
+
 **Date:** 2026-07-__ · **Status: DRAFT** (DRAFT → IN-PROGRESS → ACCEPTED / NO-GO)
 
 > First execution of ttkmd against physical Tenstorrent Blackhole p150a silicon
@@ -15,8 +18,8 @@
 
 | Item | Value |
 |---|---|
-| Host | DESKTOP-4OQSUDU, Windows 11 Enterprise Evaluation, build 26200 |
-| Card | Blackhole p150a, S/N `0000040331921017`, ASIC ID `7B772ECCB9DB2F81` |
+| Host | <test-host>, Windows 11 Enterprise Evaluation, build 26200 |
+| Card | Blackhole p150a, S/N `<board-serial>`, ASIC ID `<asic-id>` |
 | PCI location | bus 0xC1 (193), dev 0, fn 0 — `PCIROOT(C0)#PCI(0101)#PCI(0000)` |
 | Hardware ID | PCI\VEN_1E52&DEV_B140&SUBSYS_00401E52&REV_00 (subsystem 1e52:0040 = p150a) |
 | Card origin state | dismounted into Hyper-V DDA (`PCIP\` node); remounted phase 1 |
@@ -120,8 +123,8 @@ implementation. This is a known functional gap, not a regression.
 | Field (tag) | Windows | Linux/tt-smi (idle) | Unit | Tol | PASS |
 |---|---|---|---|---|---|
 | card_type (1, decoded) | | p150a (0x40) | — | exact | ☐ |
-| serial (1:2) | | 0000040331921017 | hex | exact | ☐ |
-| asic_id (61:62) | | 7B772ECCB9DB2F81 | hex | exact | ☐ |
+| serial (1:2) | | <board-serial> | hex | exact | ☐ |
+| asic_id (61:62) | | <asic-id> | hex | exact | ☐ |
 | aiclk (14) | | 800 | MHz | ±5%* | ☐ |
 | axiclk (15) / arcclk (16) | | 960 / 800 | MHz | ±5%* | ☐ |
 | asic_temp (11, 16.16→m°C) | | 51431 | m°C | ±2°C | ☐ |

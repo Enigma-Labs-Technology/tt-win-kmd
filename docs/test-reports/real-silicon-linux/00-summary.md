@@ -1,5 +1,8 @@
 # Ground-Truth Reference: Blackhole p150a on Linux tt-kmd 2.9.1-pre
 
+> Board serial, ASIC id and host name are redacted in this public copy of the report.
+
+
 Captured 2026-07-08 (~13:00 UTC) on host `omarchy`, kernel `7.0.10-arch1-1`.
 Module load at boot 08:51 local logged zero errors. Card idle throughout capture.
 (The boot journal also contains `pin_user_pages_longterm failed: -14` lines from
@@ -38,8 +41,8 @@ reset marker confirmed in source and observation.
 | Link | **32.0 GT/s (Gen5) x16**, negotiated = max (sysfs `current_link_*`, see pci-sysfs-devnode.txt) |
 | Interrupt | **single-vector plain MSI**, IRQ 152 (`msi_irqs/152` = `msi`, NOT MSI-X); INTx pin **A** (config 0x3d = 0x01), disabled via DisINTx+ |
 | Card type (sysfs) | `p150a` |
-| Board serial | `0000040331921017` |
-| ASIC ID | `7B772ECCB9DB2F81` (by-id name: `blackhole-7B772ECCB9DB2F81`) |
+| Board serial | `<board-serial>` |
+| ASIC ID | `<asic-id>` (by-id name: `blackhole-<asic-id>`) |
 | Char device | `/dev/tenstorrent/0`, dev 510:0, mode `crw-rw-rw-` |
 
 Interrupt caveat for the Windows diff: this host's pciutils 3.15.0 renders the
@@ -121,7 +124,7 @@ the CM/ARC and ETH firmware version telemetry fields are genuinely absent
 — not treat them as an error. tt-smi 3.1.1 / pyluwen 0.8.5 captured the
 snapshot (tt-smi-snapshot.json).
 
-Driver: tt-kmd **2.9.1-pre** (DKMS), source at `/home/alex/tt-kmd` =
+Driver: tt-kmd **2.9.1-pre** (DKMS), source at `~/tt-kmd` =
 `ttkmd-2.9.0-1-g0ab170d`. Kernel `7.0.10-arch1-1`.
 
 ## IOMMU: ON
@@ -171,7 +174,7 @@ therm trip 90 °C, thm limit 110 °C.
 
 ## Functional golden run — upstream test suite
 
-Built `ttkmd_test` from `/home/alex/tt-kmd/test` (one-line portability fix
+Built `ttkmd_test` from `~/tt-kmd/test` (one-line portability fix
 needed: `#include <cstdint>` added to `pin_pages.cpp` for GCC on this host —
 left in the working tree, visible via `git diff`). Ran unprivileged against
 the live card: **exit 0 — all executed tests passed** (`exit: 0` is recorded
@@ -203,7 +206,7 @@ log ordering.
 
 Gate satisfied before executing: card idle (no open fds), recovery path
 proven — `uvx tt-flash@latest` (3.10.0) working, with TWO recovery images on
-disk: `/home/alex/fw_pack-19.6.0.fwbundle` (**anchor-preserving** — matches
+disk: `~/fw_pack-19.6.0.fwbundle` (**anchor-preserving** — matches
 the card's 19.6.0.0) and `fw_pack-19.11.0.fwbundle` (newer; would change the
 anchor, last resort only). **No reflash was needed; firmware is untouched.**
 

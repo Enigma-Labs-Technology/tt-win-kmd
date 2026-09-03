@@ -1,0 +1,33 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// VERSIONINFO for ttkmd.sys. The numbers come from ttkmd-version.props through
+// the ResourceCompile preprocessor definitions, so the file version, the INF
+// DriverVer and GET_DRIVER_INFO always agree.
+
+#include <ntverp.h>
+
+#define TT_STRINGIZE2(x) #x
+#define TT_STRINGIZE(x) TT_STRINGIZE2(x)
+
+#undef VER_PRODUCTVERSION
+#define VER_PRODUCTVERSION TT_VERSION_MAJOR,TT_VERSION_MINOR,TT_VERSION_PATCH,TT_VERSION_REVISION
+#undef VER_PRODUCTVERSION_STR
+#define VER_PRODUCTVERSION_STR \
+    TT_STRINGIZE(TT_VERSION_MAJOR) "." TT_STRINGIZE(TT_VERSION_MINOR) "." \
+    TT_STRINGIZE(TT_VERSION_PATCH) "." TT_STRINGIZE(TT_VERSION_REVISION)
+
+#undef VER_COMPANYNAME_STR
+#define VER_COMPANYNAME_STR "tt-win-kmd contributors"
+#undef VER_PRODUCTNAME_STR
+#define VER_PRODUCTNAME_STR "tt-win-kmd (Windows port of tt-kmd)"
+#undef VER_LEGALCOPYRIGHT_STR
+#define VER_LEGALCOPYRIGHT_STR "Copyright (c) tt-win-kmd contributors. GPL-2.0-only."
+
+#define VER_FILETYPE VFT_DRV
+#define VER_FILESUBTYPE VFT2_DRV_SYSTEM
+#define VER_FILEDESCRIPTION_STR "Tenstorrent Blackhole kernel-mode driver (community Windows port)"
+#define VER_INTERNALNAME_STR "ttkmd.sys"
+#define VER_ORIGINALFILENAME_STR "ttkmd.sys"
+
+#include "common.ver"

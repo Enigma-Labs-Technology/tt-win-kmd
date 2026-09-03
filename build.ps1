@@ -113,6 +113,6 @@ if ($cert) {
 }
 
 Write-Host "`nArtifacts under $outDir :"
-Get-ChildItem -Recurse $outDir -Include ttkmd.sys, ttkmd.inf, *.cat, tt-test.cer |
+Get-ChildItem -Recurse $outDir -Include ttkmd.sys, *.inf, *.cat, tt-test.cer |
     Select-Object -ExpandProperty FullName |
     ForEach-Object { Write-Host "  $_" }

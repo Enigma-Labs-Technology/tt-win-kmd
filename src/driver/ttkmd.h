@@ -42,10 +42,12 @@ NTKERNELAPI VOID KeUnstackDetachProcess(_In_ PVOID ApcState);
 #define TT_BH_NOC2AXI_CFG_LEN   0x00100000u  // NOC2AXI_CFG_LEN
 
 // Driver version reported by GET_DRIVER_INFO; tracks the upstream baseline tag
-// (tt-kmd/module.h:19-21; maintenance guide step 5).
-#define TT_VERSION_MAJOR 2
-#define TT_VERSION_MINOR 11
-#define TT_VERSION_PATCH 0
+// (tt-kmd/module.h:19-21; maintenance guide step 5). The numbers come from
+// ttkmd-version.props through the project's preprocessor definitions so the
+// driver, its VERSIONINFO resource and the INF DriverVer cannot disagree.
+#if !defined(TT_VERSION_MAJOR) || !defined(TT_VERSION_MINOR) || !defined(TT_VERSION_PATCH)
+#error "TT_VERSION_* must come from ttkmd-version.props (build with ttkmd.vcxproj)"
+#endif
 
 // TLB pool geometry (tt-kmd/blackhole.c:20-28): 202 2M windows (id 201 kernel-
 // reserved) + up to 8 4G windows, clamped by BAR4 length at init.

@@ -19,6 +19,8 @@
     <RootNamespace>ttkmd</RootNamespace>
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
+  <!-- One source for the driver version: TT_VERSION_*, VERSIONINFO, INF DriverVer. -->
+  <Import Project="ttkmd-version.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
@@ -27,8 +29,10 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <!-- KMDF 1.33 is in-box on every Windows 11 build (22000 and later), which
+         matches the INF's OS floor. 1.35 would need 24H2 (DD-18). -->
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
-    <KMDF_VERSION_MINOR>35</KMDF_VERSION_MINOR>
+    <KMDF_VERSION_MINOR>33</KMDF_VERSION_MINOR>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
@@ -38,7 +42,7 @@
     <DriverType>KMDF</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
-    <KMDF_VERSION_MINOR>35</KMDF_VERSION_MINOR>
+    <KMDF_VERSION_MINOR>33</KMDF_VERSION_MINOR>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
@@ -55,10 +59,15 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalIncludeDirectories>$(ProjectDir)..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- Version numbers from ttkmd-version.props (GET_DRIVER_INFO). -->
+      <PreprocessorDefinitions>TT_VERSION_MAJOR=$(TtDriverVersionMajor);TT_VERSION_MINOR=$(TtDriverVersionMinor);TT_VERSION_PATCH=$(TtDriverVersionPatch);TT_VERSION_REVISION=$(TtDriverVersionRevision);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <!-- Debug ioctl surface (ttkmd_debug.h): Debug configuration only, so a
            Release/attestation build never carries it (docs/signing-and-deployment.md). -->
       <PreprocessorDefinitions Condition="'$(Configuration)'=='Debug'">TT_DEBUG_INTERFACES=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>TT_VERSION_MAJOR=$(TtDriverVersionMajor);TT_VERSION_MINOR=$(TtDriverVersionMinor);TT_VERSION_PATCH=$(TtDriverVersionPatch);TT_VERSION_REVISION=$(TtDriverVersionRevision);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
     <Link>
       <!-- Kernel-mode Hardware-enforced Stack Protection (kernel CET shadow
            stacks) blocks drivers without CETCOMPAT metadata from loading
@@ -71,6 +80,10 @@
     </Link>
     <Inf>
       <TimeStamp>*</TimeStamp>
+      <!-- DriverVer version part from ttkmd-version.props; without it stampinf
+           writes 1.0 and the package version disagrees with the driver. -->
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+      <DriverVersionNumber>$(TtDriverVersionNumber)</DriverVersionNumber>
     </Inf>
     <DriverSign>
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
@@ -95,7 +108,14 @@
     <ClInclude Include="..\include\ttkmd_debug.h" />
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="ttkmd.inf" />
+    <ResourceCompile Include="ttkmd.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Release: the p150a package that gets signed. Debug: the test package
+         that additionally binds the ttsim/QEMU model and the ROOT\TTKMD_SOFT
+         load-test node (DD-18); it is never submitted for signing. -->
+    <Inf Include="ttkmd.inf" Condition="'$(Configuration)'=='Release'" />
+    <Inf Include="ttkmd-test.inf" Condition="'$(Configuration)'=='Debug'" />
   </ItemGroup>
   <ItemGroup>
     <FilesToPackage Include="$(TargetPath)" />

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Single source of the driver version. Consumed by:
+    - ttkmd.vcxproj: TT_VERSION_* preprocessor definitions for the driver
+      (GET_DRIVER_INFO reports them) and for the VERSIONINFO resource,
+      and the INF DriverVer stamp.
+  Keep it equal to the upstream tt-kmd tag the ABI tracks (maintenance guide
+  step 5); bump Revision for Windows-only respins of the same upstream tag.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <TtDriverVersionMajor>2</TtDriverVersionMajor>
+    <TtDriverVersionMinor>11</TtDriverVersionMinor>
+    <TtDriverVersionPatch>0</TtDriverVersionPatch>
+    <TtDriverVersionRevision>0</TtDriverVersionRevision>
+    <TtDriverVersionNumber>$(TtDriverVersionMajor).$(TtDriverVersionMinor).$(TtDriverVersionPatch).$(TtDriverVersionRevision)</TtDriverVersionNumber>
+  </PropertyGroup>
+</Project>

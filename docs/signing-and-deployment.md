@@ -80,9 +80,17 @@ distribution or a logo is wanted. It is not required for the p150a release.
 
 ## Kernel DMA Protection
 
-Both INFs opt the device into DMA remapping (`DmaRemappingCompatible = 1`).
-`ALLOCATE_DMA_BUF` uses WDF common buffers, which are valid with remapping on
-or off. `PIN_PAGES` is refused in a translated domain because the iATU is
-programmed with the addresses the driver obtains, so on a host with Kernel DMA
-Protection active tt-umd's sysmem must come from driver buffers, which it does
-(see `docs/tt-umd-porting-notes.md`).
+Both INFs (`ttkmd.inf`, the p150a release package, and `ttkmd-test.inf`, the
+Debug-only test package, DD-18) opt the device into DMA remapping
+(`DmaRemappingCompatible = 1`). `ALLOCATE_DMA_BUF` uses WDF common buffers,
+which are valid with remapping on or off, and a `PIN_PAGES` of a view of the
+handle's own DMA buffer is backed by that buffer (DD-16), so it works in a
+translated domain too. Only a `PIN_PAGES` of arbitrary user memory is refused
+there, because the iATU would be programmed with untranslated addresses.
+tt-umd's sysmem comes from driver buffers, so it is unaffected (see
+`docs/tt-umd-porting-notes.md`).
+
+The INF `DriverVer` version is stamped from `src/driver/ttkmd-version.props`
+at build time and matches the file version of `ttkmd.sys`; Partner Center
+rejects packages whose INF and binary versions disagree, so do not edit the
+INF by hand after a build.

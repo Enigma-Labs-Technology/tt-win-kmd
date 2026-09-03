@@ -1,0 +1,88 @@
+;
+; ttkmd-test.inf - DEBUG/TEST-ONLY package for the Tenstorrent KMDF driver
+;
+; Selected by the Debug configuration only. Binds the ttsim/QEMU Blackhole
+; model (all-zero subsystem identity), the p150a for debug runs on silicon,
+; and the hardware-free ROOT\TTKMD_SOFT load-test node. Never submit this
+; package for attestation signing or ship it (DD-18); keep the common install
+; sections in step with ttkmd.inf.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = TenstorrentAccelerator
+ClassGuid   = {17db3097-300a-4168-8a1d-6c26bba9263f}
+Provider    = %ManufacturerName%
+CatalogFile = ttkmd.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+ttkmd.sys = 1,,
+
+[ClassInstall32]
+AddReg = TtClassReg
+
+[TtClassReg]
+HKR,,,0,%ClassName%
+HKR,,Icon,,-10
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+
+[Manufacturer]
+%ManufacturerName% = Tenstorrent,NT$ARCH$.10.0...22000
+
+[Tenstorrent.NT$ARCH$.10.0...22000]
+%TtQemuBlackhole.DeviceDesc% = TtDevice_Install, PCI\VEN_1E52&DEV_B140&SUBSYS_00000000
+%TtP150a.DeviceDesc%         = TtDevice_Install, PCI\VEN_1E52&DEV_B140&SUBSYS_00401E52
+%TtSoft.DeviceDesc%          = TtDevice_Install, ROOT\TTKMD_SOFT
+
+[TtDevice_Install.NT]
+CopyFiles = TtDriverCopy
+
+[TtDriverCopy]
+ttkmd.sys
+
+[TtDevice_Install.NT.HW]
+AddReg = TtDeviceHwReg, TtDmaRemappingPolicy
+
+[TtDeviceHwReg]
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+
+[TtDmaRemappingPolicy]
+HKR,"DMA Management","RemappingSupported",0x00010001,1
+
+[TtDevice_Install.NT.Services]
+AddService = ttkmd, %SPSVCINST_ASSOCSERVICE%, TtService_Install
+
+[TtService_Install]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1 ; SERVICE_KERNEL_DRIVER
+StartType     = 3 ; SERVICE_DEMAND_START
+ErrorControl  = 1 ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\ttkmd.sys
+AddReg        = TtServiceParameters
+
+[TtServiceParameters]
+HKR,Parameters,DmaRemappingCompatible,0x00010001,1
+HKR,Parameters,DmaBufferLimitMiB,0x00010001,4096
+
+[TtDevice_Install.NT.Wdf]
+KmdfService = ttkmd, TtWdfSect
+
+[TtWdfSect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName       = "Tenstorrent (community Windows port - TEST ONLY)"
+ClassName              = "Tenstorrent accelerators"
+DiskName               = "Tenstorrent ttkmd Test Installation Disk"
+TtQemuBlackhole.DeviceDesc = "Tenstorrent Blackhole ttsim/QEMU Device (Test Driver)"
+TtP150a.DeviceDesc     = "Tenstorrent Blackhole p150a AI Accelerator (Test Driver)"
+TtSoft.DeviceDesc      = "Tenstorrent ttkmd Test Soft Device"
+ServiceDesc            = "Tenstorrent kernel-mode driver (ttkmd, Test Build)"

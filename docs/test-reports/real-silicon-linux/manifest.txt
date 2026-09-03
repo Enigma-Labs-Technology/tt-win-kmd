@@ -6,7 +6,7 @@ Capture timestamp : 2026-07-08 ~08:51-09:21 local (boot 08:51; base captures
 Hostname          : omarchy
 Kernel            : Linux omarchy 7.0.10-arch1-1 #1 SMP PREEMPT_DYNAMIC Sat, 23 May 2026 14:21:20 +0000 x86_64 GNU/Linux
 tt-kmd version    : 2.9.1-pre (DKMS: tenstorrent-2.9.1/pre, installed for 7.0.10-arch1-1)
-tt-kmd source     : /home/alex/tt-kmd @ git ttkmd-2.9.0-1-g0ab170d (0ab170d "Bump version to 2.9.1-pre for development")
+tt-kmd source     : ~/tt-kmd @ git ttkmd-2.9.0-1-g0ab170d (0ab170d "Bump version to 2.9.1-pre for development")
 
 *** FIRMWARE ANCHOR — Windows testing MUST use the SAME firmware ***
   FW bundle version : 19.6.0.0   (tt_fw_bundle_ver; tt-smi raw 0x13060000)
@@ -15,7 +15,7 @@ tt-kmd source     : /home/alex/tt-kmd @ git ttkmd-2.9.0-1-g0ab170d (0ab170d "Bum
                       raw ARC0-3_FW_VERSION = None). GROUND TRUTH: expect empty
                       on Windows too.
   ETH FW            : N/A — same (eth_fw = N/A, ETH_FW_VERSION = None)
-  tt-smi            : 3.1.1 (pyluwen 0.8.5), venv /home/alex/tt-test/.tt-smi-venv
+  tt-smi            : 3.1.1 (pyluwen 0.8.5), venv ~/tt-test/.tt-smi-venv
 *******************************************************************
 
 PCI identity
@@ -32,12 +32,12 @@ PCI identity
                        this host's lspci prints pin letters off-by-one ("pin B")
   NUMA node          : -1
   char device        : /dev/tenstorrent/0 (510:0, mode crw-rw-rw-)
-  by-id              : blackhole-7B772ECCB9DB2F81 -> ../0
+  by-id              : blackhole-<asic-id> -> ../0
 
 Card identity
   Card type          : p150a       (tt_card_type)
-  Board serial       : 0000040331921017 (tt_serial)
-  ASIC ID            : 7B772ECCB9DB2F81 (tt_asic_id)
+  Board serial       : <board-serial> (tt_serial)
+  ASIC ID            : <asic-id> (tt_asic_id)
 
 Artifacts in this directory
   00-summary.md               — full report
@@ -85,7 +85,7 @@ Stage-5 reset artifacts (reset EXECUTED 09:35:57, successful, no reflash needed)
   stage5-after.sh             — sudo script for the full after-capture + delta
 
 Recovery path (verified present, NOT used): uvx tt-flash@latest (3.10.0);
-  /home/alex/fw_pack-19.6.0.fwbundle  = anchor-preserving recovery image
+  ~/fw_pack-19.6.0.fwbundle  = anchor-preserving recovery image
   fw_pack-19.11.0.fwbundle (Downloads, tt-test, reference) = newer, changes anchor
 
 Stage-5 completion artifacts (stage5-after.sh run 09:50, root):

@@ -1,8 +1,15 @@
 # tt-win-kmd — Windows KMDF port of the Tenstorrent kernel-mode driver
 
+> **Developer preview.** This driver has run on one p150a and on the
+> ttsim/QEMU rig. It is test-signed, it can crash your machine, and it is not
+> produced or supported by Tenstorrent. Use it on a development host, not on
+> a machine you depend on. See `CHANGELOG.md` for what is and is not there.
+
 Windows port of [tt-kmd](https://github.com/tenstorrent/tt-kmd) for Blackhole
 PCIe AI accelerators. Target hardware for this release line is the **p150a**
-(`PCI\VEN_1E52&DEV_B140`) on **Windows 11 x64**. The driver exposes the same
+(`PCI\VEN_1E52&DEV_B140&SUBSYS_00401E52`, the only board the release package
+binds) on **Windows 11 x64**, any build from 21H2 (22000) on; the driver targets
+the in-box KMDF 1.33. The driver exposes the same
 IOCTL ABI as the Linux driver (byte-identical request structures, one Windows
 control code per Linux request number) plus two Windows-only requests that
 replace `mmap`/`munmap`, so the Tenstorrent user-mode driver runs on top of it
@@ -52,7 +59,7 @@ in `docs/test-reports/real-silicon.md`.
 
 | Path | Contents |
 |---|---|
-| `src/driver/` | KMDF driver (`ttkmd.sys`), INF, vcxproj |
+| `src/driver/` | KMDF driver (`ttkmd.sys`), release INF (`ttkmd.inf`, p150a only), test INF (`ttkmd-test.inf`, Debug builds: adds the ttsim/QEMU model and the soft load-test node), version props, vcxproj |
 | `src/include/` | Shared user/kernel ABI header (`ttkmd_ioctl.h`) and its static ABI checks |
 | `src/ttwin_compat/` | POSIX-shaped user-mode shim (`tt_open`/`tt_ioctl`/`tt_mmap`) used by the conformance test |
 | `src/tests/` | `ttinfo.exe` (per-IOCTL tests, `--soak`) and `ttconform.exe` (every IOCTL through the shim) |
@@ -77,12 +84,36 @@ The test rig (QEMU with the `ttsim-bh` device, Windows 11 guest, Driver
 Verifier) is documented in `test/README.md`; the silicon first-contact ladder in
 `test/silicon/README.md`.
 
-## Signing and installing
+## Installing a preview build
 
-Development builds are test-signed and need `bcdedit /set testsigning on` on
-the target. Release builds are attestation-signed through the Microsoft
-Partner Center with an EV certificate; the runbook is
+Preview packages are test-signed, so the host must trust the test certificate
+and allow test-signed kernel code. Do this on a development machine only;
+test signing weakens the host's code-integrity posture until you turn it off
+again. From an elevated PowerShell, with the package (`ttkmd.sys`,
+`ttkmd.inf`, `ttkmd.cat`, `tt-test.cer`) in the current directory:
+
+```powershell
+bcdedit /set testsigning on          # then reboot once
+certutil -addstore -f Root tt-test.cer
+certutil -addstore -f TrustedPublisher tt-test.cer
+pnputil /add-driver ttkmd.inf /install
+Get-PnpDevice -Class TenstorrentAccelerator     # Status should read OK
+.\ttinfo.exe                                     # per-request smoke test
+```
+
+To remove it: `pnputil /delete-driver ttkmd.inf /uninstall /force`, then
+`bcdedit /set testsigning off` and reboot. `test/vm/guest/install-driver.ps1`
+automates the same steps for the test rig.
+
+Attestation-signed packages (EV certificate through the Microsoft Partner
+Center) need none of the test-signing steps; the runbook is
 `docs/signing-and-deployment.md`.
+
+## Reporting problems
+
+Open an issue with the Windows build, the output of `ttinfo.exe`, and, for a
+crash, the bugcheck code and the `ttkmd` TraceLogging session if you have one.
+Security-sensitive reports go through `SECURITY.md`.
 
 ## Using the driver from tt-umd
 
