@@ -569,6 +569,110 @@ static void TestM3Dma(HANDLE h, int deviceId)
         CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
               "FREE_DMA_BUF: ok=%d gle=%lu\n", ok, GetLastError());
     }
+
+    // FREE_DMA_BUF_EX (DD-16): frees a slot early; busy while a view exists.
+    {
+        struct tenstorrent_free_dma_buf_ex fr;
+        struct tenstorrent_unmap um;
+
+        // Index 0 is still mapped (va above) -> busy.
+        memset(&fr, 0, sizeof(fr));
+        fr.in.buf_index = 0;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(!ok && GetLastError() == ERROR_BUSY,
+              "free_ex mapped: ok=%d gle=%lu\n", ok, GetLastError());
+
+        // Unmap the view, then the free succeeds and the slot is reusable.
+        memset(&um, 0, sizeof(um));
+        um.in.user_va = mp.out.user_va;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_UNMAP, &um, sizeof(um), sizeof(um), &info);
+        CHECK(ok, "unmap dmabuf view gle=%lu\n", GetLastError());
+
+        memset(&fr, 0, sizeof(fr));
+        fr.in.buf_index = 0;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(ok, "free_ex index 0 gle=%lu\n", GetLastError());
+
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "free_ex twice: ok=%d gle=%lu\n", ok, GetLastError());
+
+        memset(&ab, 0, sizeof(ab));
+        ab.in.requested_size = 64 * 1024;
+        ab.in.buf_index = 0;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_DMA_BUF, &ab, sizeof(ab), sizeof(ab), &info);
+        CHECK(ok, "dmabuf realloc index 0 gle=%lu\n", GetLastError());
+
+        // NOC-mapped index 1: free tears the aperture down as well.
+        memset(&fr, 0, sizeof(fr));
+        fr.in.buf_index = 1;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(ok, "free_ex index 1 (noc) gle=%lu\n", GetLastError());
+
+        // Reserved bits and out-of-range slots are rejected.
+        memset(&fr, 0, sizeof(fr));
+        fr.in.buf_index = 0;
+        fr.in.reserved = 1;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "free_ex reserved: ok=%d gle=%lu\n", ok, GetLastError());
+        memset(&fr, 0, sizeof(fr));
+        fr.in.buf_index = 256;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "free_ex range: ok=%d gle=%lu\n", ok, GetLastError());
+        printf("dmabuf: FREE_DMA_BUF_EX busy/free/reuse PASS\n");
+    }
+}
+
+// DD-17: the per-device DMA-buffer ceiling. With the built-in default (4 GiB)
+// and the 256 MiB per-buffer cap, the 17th full-size buffer must be refused
+// with the quota error and earlier ones stay usable. Skipped when the driver
+// runs without a limit (registry override 0) or the host cannot supply the
+// contiguous memory, since neither proves anything about the ceiling.
+static void TestM3DmaQuota(HANDLE h, int deviceId)
+{
+    struct tenstorrent_allocate_dma_buf ab;
+    struct tenstorrent_free_dma_buf_ex fr;
+    DWORD info;
+    BOOL ok;
+    int allocated = 0;
+    int i;
+    DWORD gle = 0;
+
+    if (deviceId != 0xB140) {
+        return;
+    }
+
+    for (i = 0; i < 17; i++) {
+        memset(&ab, 0, sizeof(ab));
+        ab.in.requested_size = 256u << 20;
+        ab.in.buf_index = (uint8_t)(100 + i);
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_DMA_BUF, &ab, sizeof(ab), sizeof(ab), &info);
+        if (!ok) {
+            gle = GetLastError();
+            break;
+        }
+        allocated++;
+    }
+
+    if (allocated == 17) {
+        printf("dmabuf quota: 17 x 256 MiB accepted (limit disabled or raised); skipped\n");
+    } else if (allocated < 16 && gle == ERROR_NO_SYSTEM_RESOURCES) {
+        printf("dmabuf quota: host ran out of contiguous memory after %d buffers; skipped\n", allocated);
+    } else {
+        CHECK(allocated == 16 && gle == ERROR_NOT_ENOUGH_QUOTA,
+              "dmabuf quota: allocated=%d gle=%lu (want 16 + ERROR_NOT_ENOUGH_QUOTA)\n",
+              allocated, gle);
+        printf("dmabuf quota: 16 x 256 MiB then ERROR_NOT_ENOUGH_QUOTA PASS\n");
+    }
+
+    for (i = 0; i < allocated; i++) {
+        memset(&fr, 0, sizeof(fr));
+        fr.in.buf_index = (uint32_t)(100 + i);
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(ok, "dmabuf quota: free %d gle=%lu\n", i, GetLastError());
+    }
 }
 
 // M3 (pin): PIN_PAGES positive + negatives. Factored from the original
@@ -631,7 +735,228 @@ static void TestM3Pin(HANDLE h, int deviceId)
           "pin misaligned: ok=%d gle=%lu\n", ok, GetLastError());
 
     VirtualFree(pinBuf, 0, MEM_RELEASE);
+
+    // --- DD-16: pinning a MAP view of one of this handle's DMA buffers -----
+    // No pages are locked; the device address is the buffer's bus address and
+    // the NOC aperture is allocated bottom-up (the tt-umd sysmem path).
+    {
+        struct tenstorrent_allocate_dma_buf ab;
+        struct tenstorrent_map mp;
+        struct tenstorrent_free_dma_buf_ex fr;
+        struct tenstorrent_unmap um;
+        struct {
+            struct tenstorrent_pin_pages_in in;
+            struct tenstorrent_pin_pages_out_extended out;
+        } ppx;
+
+        memset(&ab, 0, sizeof(ab));
+        ab.in.requested_size = 1u << 20;
+        ab.in.buf_index = 4;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_ALLOCATE_DMA_BUF, &ab, sizeof(ab), sizeof(ab), &info);
+        CHECK(ok, "backed pin: dmabuf alloc gle=%lu\n", GetLastError());
+
+        memset(&mp, 0, sizeof(mp));
+        mp.in.mmap_offset = ab.out.mapping_offset;
+        mp.in.length = 1u << 20;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
+        CHECK(ok, "backed pin: map gle=%lu\n", GetLastError());
+
+        // Whole view, NOC-mapped: device address == the buffer's bus address.
+        memset(&ppx, 0, sizeof(ppx));
+        ppx.in.output_size_bytes = sizeof(ppx.out);
+        ppx.in.virtual_address = mp.out.user_va;
+        ppx.in.size = 1u << 20;
+        ppx.in.flags = TENSTORRENT_PIN_PAGES_CONTIGUOUS | TENSTORRENT_PIN_PAGES_NOC_DMA;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &ppx, sizeof(ppx), sizeof(ppx), &info);
+        CHECK(ok, "backed pin: pin gle=%lu\n", GetLastError());
+        CHECK(ppx.out.physical_address == ab.out.physical_address,
+              "backed pin: phys %llx != bus %llx\n",
+              (unsigned long long)ppx.out.physical_address,
+              (unsigned long long)ab.out.physical_address);
+        CHECK(ppx.out.noc_address >= (4ull << 58),
+              "backed pin: noc=%llx\n", (unsigned long long)ppx.out.noc_address);
+
+        // The buffer cannot be freed while the pin references it.
+        memset(&fr, 0, sizeof(fr));
+        fr.in.buf_index = 4;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(!ok && GetLastError() == ERROR_BUSY,
+              "backed pin: free while pinned ok=%d gle=%lu\n", ok, GetLastError());
+
+        memset(&up, 0, sizeof(up));
+        up.in.virtual_address = mp.out.user_va;
+        up.in.size = 1u << 20;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_UNPIN_PAGES, &up, sizeof(up), sizeof(up), &info);
+        CHECK(ok, "backed pin: unpin gle=%lu\n", GetLastError());
+
+        // Sub-range inside the view: offset carries through to the address.
+        memset(&ppx, 0, sizeof(ppx));
+        ppx.in.output_size_bytes = sizeof(ppx.out);
+        ppx.in.virtual_address = mp.out.user_va + 4096;
+        ppx.in.size = 8192;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &ppx, sizeof(ppx), sizeof(ppx), &info);
+        CHECK(ok, "backed pin: sub-range pin gle=%lu\n", GetLastError());
+        CHECK(ppx.out.physical_address == ab.out.physical_address + 4096,
+              "backed pin: sub-range phys %llx\n",
+              (unsigned long long)ppx.out.physical_address);
+        up.in.virtual_address = mp.out.user_va + 4096;
+        up.in.size = 8192;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_UNPIN_PAGES, &up, sizeof(up), sizeof(up), &info);
+        CHECK(ok, "backed pin: sub-range unpin gle=%lu\n", GetLastError());
+
+        // A range running past the view is not backed and falls through to
+        // the direct path, which rejects the driver mapping as non-user RAM
+        // or refuses in a translated domain; either way it must not succeed
+        // as a backed pin.
+        memset(&ppx, 0, sizeof(ppx));
+        ppx.in.output_size_bytes = sizeof(ppx.out);
+        ppx.in.virtual_address = mp.out.user_va + (1u << 20) - 4096;
+        ppx.in.size = 8192;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &ppx, sizeof(ppx), sizeof(ppx), &info);
+        CHECK(!ok, "backed pin: overrun pin unexpectedly ok\n");
+
+        memset(&um, 0, sizeof(um));
+        um.in.user_va = mp.out.user_va;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_UNMAP, &um, sizeof(um), sizeof(um), &info);
+        CHECK(ok, "backed pin: unmap gle=%lu\n", GetLastError());
+        memset(&fr, 0, sizeof(fr));
+        fr.in.buf_index = 4;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_FREE_DMA_BUF_EX, &fr, sizeof(fr), sizeof(fr), &info);
+        CHECK(ok, "backed pin: free gle=%lu\n", GetLastError());
+        printf("pin: DMA-buffer-backed pin/sub-range/busy PASS\n");
+    }
     // dmabufs/maps intentionally left live: cleanup-on-close covers them.
+}
+
+// DD-15: MAP/UNMAP/PIN/UNPIN are only honoured from the process that opened
+// the handle. Duplicate a handle into a child and let it try a MAP; the
+// driver must answer ERROR_ACCESS_DENIED before looking at the request.
+static void TestProcessGuard(const WCHAR *path)
+{
+    SECURITY_ATTRIBUTES sa;
+    HANDLE inheritable;
+    WCHAR exe[MAX_PATH];
+    WCHAR cmdline[MAX_PATH + 64];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD exitCode = (DWORD)-1;
+    BOOL ok;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    inheritable = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                              OPEN_EXISTING, 0, NULL);
+    CHECK(inheritable != INVALID_HANDLE_VALUE, "guard: open gle=%lu\n", GetLastError());
+    if (inheritable == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    if (GetModuleFileNameW(NULL, exe, MAX_PATH) == 0) {
+        CHECK(0, "guard: GetModuleFileName gle=%lu\n", GetLastError());
+        CloseHandle(inheritable);
+        return;
+    }
+    swprintf_s(cmdline, MAX_PATH + 64, L"\"%s\" --child-map %llu", exe,
+               (unsigned long long)(uintptr_t)inheritable);
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    ok = CreateProcessW(exe, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    CHECK(ok, "guard: CreateProcess gle=%lu\n", GetLastError());
+    if (ok) {
+        WaitForSingleObject(pi.hProcess, 30000);
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CHECK(exitCode == 0, "guard: child exit code %lu (0 = MAP refused with ACCESS_DENIED)\n",
+              exitCode);
+        if (exitCode == 0) {
+            printf("guard: MAP through an inherited handle refused in the child PASS\n");
+        }
+    }
+    CloseHandle(inheritable);
+}
+
+// Child side of TestProcessGuard: the handle value was inherited from the
+// parent. Exit 0 only if MAP is refused with ERROR_ACCESS_DENIED.
+static int RunChildMap(unsigned long long handleValue)
+{
+    HANDLE h = (HANDLE)(uintptr_t)handleValue;
+    struct tenstorrent_map mp;
+    DWORD info;
+    BOOL ok;
+
+    memset(&mp, 0, sizeof(mp));
+    mp.in.mmap_offset = 0;      // BAR0 UC base; never reached
+    mp.in.length = 4096;
+    ok = TtIoctl(h, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
+    if (ok) {
+        printf("child-map: MAP unexpectedly succeeded\n");
+        return 1;
+    }
+    if (GetLastError() != ERROR_ACCESS_DENIED) {
+        printf("child-map: MAP failed with gle=%lu, want ERROR_ACCESS_DENIED\n", GetLastError());
+        return 1;
+    }
+    return 0;
+}
+
+// --multiproc N: N concurrent copies of --soak M against the device, the
+// multi-process regime tt-umd and tt-metal run in. Each child is a full
+// ttinfo invocation so the per-handle teardown paths interleave for real.
+static int RunMultiproc(int processes, int cycles)
+{
+    WCHAR exe[MAX_PATH];
+    HANDLE *procs;
+    int i;
+    int failures = 0;
+
+    if (GetModuleFileNameW(NULL, exe, MAX_PATH) == 0) {
+        printf("multiproc: GetModuleFileName gle=%lu\n", GetLastError());
+        return 1;
+    }
+    procs = (HANDLE *)calloc((size_t)processes, sizeof(HANDLE));
+    if (procs == NULL) {
+        return 1;
+    }
+    for (i = 0; i < processes; i++) {
+        WCHAR cmdline[MAX_PATH + 64];
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+
+        swprintf_s(cmdline, MAX_PATH + 64, L"\"%s\" --soak %d", exe, cycles);
+        memset(&si, 0, sizeof(si));
+        si.cb = sizeof(si);
+        memset(&pi, 0, sizeof(pi));
+        if (!CreateProcessW(exe, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            printf("multiproc: CreateProcess %d gle=%lu\n", i, GetLastError());
+            failures++;
+            continue;
+        }
+        CloseHandle(pi.hThread);
+        procs[i] = pi.hProcess;
+    }
+    for (i = 0; i < processes; i++) {
+        DWORD exitCode = (DWORD)-1;
+
+        if (procs[i] == NULL) {
+            continue;
+        }
+        WaitForSingleObject(procs[i], INFINITE);
+        GetExitCodeProcess(procs[i], &exitCode);
+        CloseHandle(procs[i]);
+        if (exitCode != 0) {
+            printf("multiproc: child %d exit code %lu\n", i, exitCode);
+            failures++;
+        }
+    }
+    free(procs);
+    printf("multiproc: %d processes x %d cycles, %d failures %s\n",
+           processes, cycles, failures, failures == 0 ? "PASS" : "FAIL");
+    return failures == 0 ? 0 : 1;
 }
 
 // Background blocking-acquire: blocks in the driver until the lock frees.
@@ -1404,6 +1729,8 @@ static void Usage(const WCHAR *argv0)
         "  --sim-oracle      keep ttsim exact-equality checks (board id, AICLK,\n"
         "                    CSM liveness). Default off = silicon mode.\n"
         "  --soak N          open/alloc/map/pin/close soak, N cycles.\n"
+        "  --multiproc P     run P concurrent --soak children (default 200\n"
+        "                    cycles each, or --soak N).\n"
         "  --storm N         DESTRUCTIVE reset storm, N iterations.\n"
         "  --help            this text.\n");
 }
@@ -1415,6 +1742,8 @@ int wmain(int argc, wchar_t **argv)
     int devices = 0;
     int soakCycles = 0;
     int stormIters = 0;
+    int multiprocCount = 0;
+    unsigned long long childMapHandle = 0;
     BOOL allLegacy = FALSE;
     BOOL haveOnly = FALSE;
     unsigned onlyMask = 0;
@@ -1439,6 +1768,10 @@ int wmain(int argc, wchar_t **argv)
             soakCycles = _wtoi(argv[++argi]);
         } else if (wcscmp(argv[argi], L"--storm") == 0 && argi + 1 < argc) {
             stormIters = _wtoi(argv[++argi]);
+        } else if (wcscmp(argv[argi], L"--multiproc") == 0 && argi + 1 < argc) {
+            multiprocCount = _wtoi(argv[++argi]);
+        } else if (wcscmp(argv[argi], L"--child-map") == 0 && argi + 1 < argc) {
+            childMapHandle = _wcstoui64(argv[++argi], NULL, 10);
         } else if (wcscmp(argv[argi], L"--help") == 0 ||
                    wcscmp(argv[argi], L"-h") == 0 ||
                    wcscmp(argv[argi], L"/?") == 0) {
@@ -1449,6 +1782,13 @@ int wmain(int argc, wchar_t **argv)
             Usage(argv[0]);
             return 1;
         }
+    }
+
+    if (childMapHandle != 0) {
+        return RunChildMap(childMapHandle);
+    }
+    if (multiprocCount > 0) {
+        return RunMultiproc(multiprocCount, soakCycles > 0 ? soakCycles : 200);
     }
 
     // Effective selector set: explicit --only, else the read-only-safe default.
@@ -1516,7 +1856,9 @@ int wmain(int argc, wchar_t **argv)
             TestM2Firmware(h, deviceId);
             TestM3Tlb(h, deviceId);
             TestM3Dma(h, deviceId);
+            TestM3DmaQuota(h, deviceId);
             TestM3Pin(h, deviceId);
+            TestProcessGuard(path);
             TestM5(path, h, deviceId);
             CloseHandle(h);
             if (isRealDevice) {
@@ -1548,9 +1890,11 @@ int wmain(int argc, wchar_t **argv)
         }
         if (mask & SEL_DMA) {
             TestM3Dma(h, deviceId);
+            TestM3DmaQuota(h, deviceId);
         }
         if (mask & SEL_PIN) {
             TestM3Pin(h, deviceId);
+            TestProcessGuard(path);
         }
         CloseHandle(h);
     }
