@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/blackhole.h + the ARC/telemetry constants of blackhole.c
 // (lines 56-74) and msgqueue.h.
 #pragma once

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // ttwin_compat — POSIX-shaped compatibility layer over the Windows ttkmd driver.
 //
 // Purpose: let tt-umd's device-access layer (device/pcie/pci_device.cpp and

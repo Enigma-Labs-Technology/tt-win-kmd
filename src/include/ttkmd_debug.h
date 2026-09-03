@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Windows-only DEBUG ioctls (no Linux equivalent; spec mapping row
 // "debugfs/procfs -> debug-only IOCTLs gated behind a build flag").
 //

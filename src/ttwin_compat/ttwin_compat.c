@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // ttwin_compat implementation. Maps POSIX-shaped device access onto the ttkmd
 // driver's device interface + IOCTLs. See ttwin_compat.h and
 // docs/tt-umd-porting-notes.md.

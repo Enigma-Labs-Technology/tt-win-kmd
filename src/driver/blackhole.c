@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/blackhole.c (kernel-TLB NOC access, CSM accessors,
 // send_arc_message, telemetry_probe/read_telemetry_tag) + tt-kmd/msgqueue.c
 // (arc_msg_push/arc_msg_pop) — the M2 subset.

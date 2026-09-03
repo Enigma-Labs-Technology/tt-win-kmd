@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/chardev.c power aggregation (ioctl_set_power_state,
 // chardev.c:562-589; tenstorrent_set_aggregated_power_state_locked,
 // chardev.c:478-545). Multi-client: each handle stores a contribution; the

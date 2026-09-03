@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/enumerate.c (tenstorrent_pci_probe / tenstorrent_pci_remove).
 // M1 scope: device creation, interface publication with per-device reference
 // string, PCI identity capture, BAR inventory by PCI BAR index, and the

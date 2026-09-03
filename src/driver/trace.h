@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd printk/dev_dbg logging surface (replaced by TraceLogging ETW, DD-3)
 #pragma once
 

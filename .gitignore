@@ -1,4 +1,5 @@
 # Build outputs
+/out/
 [Dd]ebug/
 [Rr]elease/
 x64/
@@ -25,13 +26,62 @@ smvstats.txt
 .vs/
 *.user
 *.suo
+# JetBrains IDE metadata
+.idea/
 
 # Test artifacts
 test/vm/*.qcow2
 test/vm/*.img
 test/vm/*.iso
+test/vm/OVMF_VARS.fd
+test/vm/OVMF_VARS.runtime.fd
+test/vm/qmp.sock
+test/vm/vm-*.bmp
+test/vm/vm-*.ppm
+test/vm/.vm-*.bmp
+test/vm/.vm-*.ppm
+test/vm/vm-final-*.log
+test/vm/vm-*.png
+test/vm/known_hosts
+test/vm/guest_id_ed25519*
+test/vm/ssh_host_*_key*
+test/vm/.unattend-stage.*/
+test/vm/vm-snapshots/
+test/vm/.vm-*
+test/qemu-ttsim/qemu-*.tar.xz
 test/artifacts/
+# CodeQL databases are large derived analysis state. Keep the small,
+# content-bound result/environment/failure records under docs/test-reports,
+# but never stage the database itself as source or release documentation.
+docs/test-reports/codeql-*/database/
+__pycache__/
+*.py[cod]
 
 # Certificates (never commit private keys)
 *.pfx
+*.p12
+*.pem
+*.key
+*.ppk
 *.cer
+id_rsa*
+id_ecdsa*
+id_ed25519*
+
+# Versioned release policy authorities. Keep build drops ignored while
+# permitting only reviewed machine-readable locks, returned-package authority
+# records, final-CodeQL authority records, source-freeze owner policies, the
+# non-promoting final-decision template, and schemas.
+!/release/
+/release/*
+!/release/toolchain-lock.json
+!/release/final-codeql-qualification-authority.json
+!/release/final-codeql-qualification-authority.template.json
+!/release/final-production-decision.template.json
+!/release/source-freeze-owner-approval-policy.json
+!/release/source-freeze-owner-approval-policy.template.json
+!/release/microsoft-returned-expectation-authority.json
+!/release/microsoft-returned-signtool-trust-lock.json
+!/release/schemas/
+/release/schemas/*
+!/release/schemas/*.json

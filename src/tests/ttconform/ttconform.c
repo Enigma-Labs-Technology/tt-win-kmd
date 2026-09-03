@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // M6 conformance suite: exercises every driver IOCTL exclusively through the
 // ttwin_compat shim (tt_open/tt_ioctl/tt_mmap/tt_munmap/tt_close), proving the
 // shim is a working ABI a ported tt-umd can build against. One row per parity-

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/chardev.c resource-lock ioctl (ioctl_lock_ctl,
 // chardev.c:371-430) + acquire_resource_lock_blocking (chardev.c:323-367).
 // 64 device locks; a device "held" bitmap plus a per-handle "held-by-me"

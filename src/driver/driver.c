@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/module.c (tenstorrent_init / tenstorrent_exit, module.c:76-108)
 #include "ttkmd.h"
 

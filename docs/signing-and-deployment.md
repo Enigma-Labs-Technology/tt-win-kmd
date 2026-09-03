@@ -1,61 +1,83 @@
 # Signing and Deployment Guide
 
-## Development (test signing) — current state
+## Development (test signing)
 
-Every `./build.sh` produces a test-signed package in `out/<Config>/`:
+Every `build.ps1` run produces a test-signed package in `out/<Config>/`:
 
 - MSBuild's `TestSign` target signs `ttkmd.sys` with the auto-generated
-  `WDKTestCert` from `Cert:\CurrentUser\My` (SHA256 file digest via
-  `DriverSign.FileDigestAlgorithm`, see DD-1).
-- The driver targets run Inf2Cat and sign `ttkmd.cat` with the same certificate.
+  `WDKTestCert` from `Cert:\CurrentUser\My` (SHA-256 file digest, DD-1).
+- Inf2Cat produces `ttkmd.cat`, signed with the same certificate.
 - `build.ps1` exports the public certificate as `tt-test.cer` for guest trust.
 
-Target machine (the QEMU test VM, never the development host — OQ-3):
+Target machine (the QEMU test VM, or a lab host with Secure Boot off):
 
 ```powershell
-bcdedit /set testsigning on          # done by test/vm/firstlogon.ps1
+bcdedit /set testsigning on          # reboot afterwards
 certutil -addstore -f Root tt-test.cer
 certutil -addstore -f TrustedPublisher tt-test.cer
 pnputil /add-driver ttkmd.inf /install
 ```
 
-`test/vm/guest/install-driver.ps1` automates all of this.
+`test/vm/guest/install-driver.ps1` automates this for the VM.
 
-## Release (attestation signing) — the path when this ships
+## Release (attestation signing)
 
-Test-signed drivers never load on end-user machines (Secure Boot + code-integrity
-policy). The supported route for a non-WHQL PnP driver:
+Test-signed drivers do not load on end-user machines: Secure Boot and the
+kernel code-integrity policy require a Microsoft signature. A PnP driver that
+does not go through WHQL is signed by Microsoft through **attestation** on the
+Partner Center hardware dashboard. Prerequisites, both already in hand for this
+project: an **EV code-signing certificate** for the publishing legal entity and
+a **Partner Center hardware program account** registered with that certificate.
 
-1. **EV code-signing certificate** for the publishing legal entity (Tenstorrent or
-   the community org shipping the port). Required to onboard the Partner Center
-   hardware program.
-2. **Microsoft Partner Center hardware dashboard**: create a hardware submission,
-   upload a `.cab` containing `ttkmd.sys`, `ttkmd.inf`, `ttkmd.cat` (cab itself
-   EV-signed). Choose **attestation signing** (no HLK required; Windows 10/11
-   desktop only — matches this driver's support matrix).
-3. Microsoft returns the package Microsoft-signed; that package installs on
-   standard Secure-Boot machines.
-4. Optional later: full **WHQL** via HLK playlist for the custom device class if
-   logo requirements ever matter.
+Runbook (one submission per release):
 
-Constraints to preserve for attestation compatibility:
+1. Build the release package with Driver Code Analysis:
+   `build.ps1 -Configuration Release -Test`. The Release configuration does not
+   compile the debug-only IOCTLs (`TT_DEBUG_INTERFACES` is Debug-only in
+   `ttkmd.vcxproj`).
+2. Run `InfVerif /h /w out\Release\ttkmd.inf` from the EWDK; attestation
+   rejects INF errors. `PnpLockdown=1` stays in the INF.
+3. Sign the binaries with the EV certificate (the test signature is replaced):
 
-- `PnpLockdown=1` stays in the INF (already present).
-- INF must pass `InfVerif /h` with no errors (driver-package rules; the build's
-  Inf2Cat already enforces structural validity — add `InfVerif` to `build.ps1
-  -Test` when targeting a submission).
-- No custom kernel-mode signing exemptions; the driver must not rely on
-  test-signing-only behavior.
-- Attestation-signed drivers are not distributed via Windows Update by default —
-  ship via installer (parallel of tt-kmd's DKMS packaging; a future
-  `tt-win-installer` can wrap `pnputil`).
+   ```powershell
+   signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+       /n "<EV certificate subject>" out\Release\ttkmd.sys
+   inf2cat /driver:out\Release /os:10_X64
+   signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+       /n "<EV certificate subject>" out\Release\ttkmd.cat
+   ```
 
-## Kernel DMA Protection note
+   With a hardware-token EV certificate `signtool` prompts for the token PIN.
+4. Package `ttkmd.sys`, `ttkmd.inf`, `ttkmd.cat` in a `.cab` (`makecab` with a
+   DDF listing the three files) and sign the cab with the EV certificate.
+5. Partner Center: Hardware, "Submit new hardware", upload the cab, select
+   the Windows 11 x64 attestation target(s), request signature. No HLK
+   package is needed for attestation.
+6. Download the returned package: it contains the Microsoft-signed `ttkmd.cat`
+   and `ttkmd.sys`. Install it on a stock Windows 11 machine with Secure Boot
+   and memory integrity (HVCI) on, with `pnputil /add-driver ttkmd.inf /install`,
+   and rerun `ttinfo.exe` and `ttconform.exe` before publishing.
 
-On hosts with Kernel DMA Protection / IOMMU enabled, external-enclosure PCIe
-devices may be blocked until the driver declares DMA remapping compatibility.
-When M3 lands, evaluate adding the `DmaRemappingCompatible` device property in the
-INF (`HKR,Parameters,DmaRemappingCompatible,0x00010001,1`) after verifying the
-driver's DMA paths are remapping-safe — tracked as an M3 design item in the parity
-matrix notes and to be tested with DMA remapping both on and off (spec hard
-constraint 4/IOMMU row of the architecture table).
+Attestation-signed drivers are not distributed through Windows Update; ship
+the signed package with an installer or instructions to run `pnputil`.
+
+Constraints to keep for attestation compatibility:
+
+- `PnpLockdown=1` in the INF, no `CopyFiles` outside the driver store.
+- No dependence on test-signing behaviour, no debug IOCTLs in Release.
+- The driver requests CET compatibility and links with `/INTEGRITYCHECK`;
+  keep both, HVCI-enabled machines are the default target.
+
+## Optional: WHQL
+
+A full HLK run against the custom device class only matters if Windows Update
+distribution or a logo is wanted. It is not required for the p150a release.
+
+## Kernel DMA Protection
+
+Both INFs opt the device into DMA remapping (`DmaRemappingCompatible = 1`).
+`ALLOCATE_DMA_BUF` uses WDF common buffers, which are valid with remapping on
+or off. `PIN_PAGES` is refused in a translated domain because the iATU is
+programmed with the addresses the driver obtains, so on a host with Kernel DMA
+Protection active tt-umd's sysmem must come from driver buffers, which it does
+(see `docs/tt-umd-porting-notes.md`).

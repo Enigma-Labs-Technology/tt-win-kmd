@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/memory.c (mmap offset namespace, DMA buffers, iATU
 // allocator, pin/unpin) + tt-kmd/tlb.c (TLB pool) — the M3 subset per DD-8.
 //

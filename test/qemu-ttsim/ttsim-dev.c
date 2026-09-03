@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 /*
  * ttsim-bh: virtual Tenstorrent Blackhole PCIe endpoint backed by libttsim.so
  *
