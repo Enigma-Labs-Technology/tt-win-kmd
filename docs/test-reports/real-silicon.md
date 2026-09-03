@@ -30,7 +30,7 @@
 | Above-4G decoding / Resizable BAR in BIOS | MUST be enabled (BAR4 = 32 GiB needs large-BAR) |
 | Kernel DMA Protection (msinfo32) | __________ (Linux host has AMD-Vi ON → run the ON matrix cell) |
 | Secure Boot / testsigning | off (campaign) / on |
-| Driver | ttkmd.sys `[M7]` (commits bbcfb79 + 2f847cd + this), KMDF 1.35, /W4+WX + CA clean |
+| Driver | ttkmd.sys `[M7]` (commits 9beffec + 389aa14 + this), KMDF 1.35, /W4+WX + CA clean |
 | Driver Verifier | flags 0x9BB on ttkmd.sys — active: ____ |
 | ttinfo build | silicon mode (sim oracles behind --sim-oracle) |
 | Linux ground-truth capture | `real-silicon-linux/`, host omarchy, kernel 7.0.10-arch1-1, tt-kmd 2.9.1-pre, tt-smi 3.1.1 — captured 2026-07-08 |
@@ -59,7 +59,7 @@ byte-identical output).
 
 | Rung | Command | Result | Heartbeat after | Notes |
 |---|---|---|---|---|
-| a install+bind | 20-install-driver.ps1 | **PASS** 2026-07-08 | — | Status OK, Service ttkmd, pkg oem36. Host gauntlet first: HVCI off, /CETCOMPAT (64f582f), FACEIT AC disabled — see "Host security gauntlet" below |
+| a install+bind | 20-install-driver.ps1 | **PASS** 2026-07-08 | — | Status OK, Service ttkmd, pkg oem36. Host gauntlet first: HVCI off, /CETCOMPAT (757f661), FACEIT AC disabled — see "Host security gauntlet" below |
 | b info/map/telem (read-only) | ttinfo.exe | **PASS** exit 0 | advancing (in-dump assert) | present-mask 0x1fff; BARs 512M/1M/32G; all values vs GT: exacts exact, lives in range; fw 19.6.0.0 = anchor; 0 WHEA, 0 bugcheck |
 | c TLB + safe reg reads | ttinfo --only tlb | **PASS** exit 0 | advancing (in-test, both paths) | 2M window to ARC (8,0) via TLB-map and open-BAR0 paths; EBUSY/double-free negatives correct |
 | d DMA loopback | ttinfo --only dma | **PASS** exit 0 | advancing | 64K common buffer CPU-verified, bus=0x201a469000 (<2^58); iATU region noc=0x13ffffffffff0000 (inside 4<<58 aperture, top-down) |
@@ -186,7 +186,7 @@ load; each masked the next. Recorded so future bring-ups run preflight first
 |---|---|---|---|
 | 1 | Secure Boot | testsigning ignored | disabled in UEFI (campaign only) |
 | 2 | Memory Integrity (HVCI) | Code 39, status 0xC0000022; VTL1 CI rejects test certs even in test mode | Core Isolation → Memory integrity off + reboot |
-| 3 | Kernel CET shadow stacks (`KernelShadowStacks Enabled=1`) | StartService 1450 / 0xC000009A, DriverEntry never reached | binary linked /CETCOMPAT (64f582f) — enforcement kept ON |
+| 3 | Kernel CET shadow stacks (`KernelShadowStacks Enabled=1`) | StartService 1450 / 0xC000009A, DriverEntry never reached | binary linked /CETCOMPAT (757f661) — enforcement kept ON |
 | 4 | FACEIT anti-cheat (`FACEIT_AC.sys`, `FACEIT_IOMMU.sys`, system-start) | rotating generic statuses; CI verbose shows the file never opened — kernel callback veto before CI | both services disabled + reboot (campaign only) |
 
 Teardown checklist additions: re-enable Secure Boot, Memory Integrity, FACEIT
