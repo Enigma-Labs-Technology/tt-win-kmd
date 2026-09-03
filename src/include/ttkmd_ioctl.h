@@ -400,6 +400,22 @@ struct tenstorrent_smc_msg {
 #define IOCTL_TENSTORRENT_MAP   TT_CTL_EXT(0)
 #define IOCTL_TENSTORRENT_UNMAP TT_CTL_EXT(1)
 
+// FREE_DMA_BUF_EX (DD-16): releases one DMA buffer allocated by
+// ALLOCATE_DMA_BUF before the handle closes. Linux's FREE_DMA_BUF (nr 4)
+// carries an empty payload and still returns -EINVAL upstream, so Windows
+// adds a private request that names the slot. Fails with STATUS_DEVICE_BUSY
+// while a MAP view or a PIN_PAGES registration still references the buffer.
+#define IOCTL_TENSTORRENT_FREE_DMA_BUF_EX TT_CTL_EXT(4)
+
+struct tenstorrent_free_dma_buf_ex_in {
+    uint32_t buf_index;        // [0, TENSTORRENT_MAX_DMA_BUFS)
+    uint32_t reserved;         // must be 0
+};
+
+struct tenstorrent_free_dma_buf_ex {
+    struct tenstorrent_free_dma_buf_ex_in in;
+};
+
 // Telemetry query (hwmon-equivalent; Windows has no hwmon). Values use the
 // EXACT Linux hwmon ABI scaling/units so tooling ports mechanically. Each
 // field's `present` bit is set only if the underlying firmware tag exists

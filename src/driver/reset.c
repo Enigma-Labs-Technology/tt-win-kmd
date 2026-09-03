@@ -11,15 +11,6 @@
 #include "ttkmd_ioctl.h"
 #include "blackhole.h"
 
-// KeStackAttachProcess/KeUnstackDetachProcess and KAPC_STATE live in ntifs.h,
-// which conflicts with the ntddk.h WDF already includes. Declare the functions
-// with an opaque APC-state pointer; callers pass a suitably-sized aligned
-// buffer (KAPC_STATE is 48 bytes on x64). Used to unmap a mapping from a
-// foreign process on reset (DD-9).
-NTKERNELAPI VOID KeStackAttachProcess(_Inout_ PEPROCESS Process,
-                                      _Out_ PVOID ApcState);
-NTKERNELAPI VOID KeUnstackDetachProcess(_In_ PVOID ApcState);
-#define TT_KAPC_STATE_QWORDS 8   // >= sizeof(KAPC_STATE), 8-byte aligned
 
 // PCI config offsets (uapi/linux/pci_regs.h + tt-kmd/pcie.c)
 #define TT_PCI_COMMAND 0x04
@@ -392,24 +383,8 @@ TtResetZapMappings(
 
             if (!mapping->IsDmaBuf) {
                 RemoveEntryList(&mapping->Entry);
-                if (mapping->UserVa != NULL && mapping->Mdl != NULL) {
-                    if (mapping->Process == PsGetCurrentProcess()) {
-                        MmUnmapLockedPages(mapping->UserVa, mapping->Mdl);
-                    } else {
-                        ULONG64 apc[TT_KAPC_STATE_QWORDS];
-
-                        KeStackAttachProcess(mapping->Process, apc);
-                        MmUnmapLockedPages(mapping->UserVa, mapping->Mdl);
-                        KeUnstackDetachProcess(apc);
-                    }
-                }
-                if (mapping->Mdl != NULL) {
-                    IoFreeMdl(mapping->Mdl);
-                }
-                if (mapping->Process != NULL) {
-                    ObDereferenceObject(mapping->Process);
-                }
-                ExFreePoolWithTag(mapping, TT_TAG_MAPPING);
+                // Attaches to the creating process when this is not it.
+                TtDestroyUserMapping(mapping);
                 zapped++;
             }
             entry = next;

@@ -406,6 +406,12 @@ TtEvtIoDeviceControl(
         status = TtIoctlQueryTelemetry(context, Request);
         goto release;
     }
+    if (IoControlCode == IOCTL_TENSTORRENT_FREE_DMA_BUF_EX) {
+        status = (fileObject != NULL)
+                     ? TtIoctlFreeDmaBufEx(context, fileObject, Request)
+                     : STATUS_INVALID_DEVICE_REQUEST;
+        goto release;
+    }
 
 #ifdef TT_DEBUG_INTERFACES
     if (IoControlCode == IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY) {
@@ -529,6 +535,15 @@ TtEvtIoInCallerContext(
              (code == IOCTL_TENSTORRENT_UNPIN_PAGES) ? 10u : MAXUINT32;
     TtResetAcquireShared(context);
     status = TtCheckIoGates(context, fileObject, gateNr);
+    if (NT_SUCCESS(status) &&
+        TtGetFileContext(fileObject)->CreatorProcess != PsGetCurrentProcess()) {
+        // DD-15: a handle duplicated or inherited into another process may
+        // not create or release process-bound state; the address space and
+        // the locked-page accounting belong to the opener.
+        TraceLoggingWrite(g_TtTraceProvider, "CallerContextWrongProcess",
+                          TraceLoggingUInt32(code, "code"));
+        status = STATUS_ACCESS_DENIED;
+    }
     if (NT_SUCCESS(status)) {
         if (code == IOCTL_TENSTORRENT_MAP) {
             status = TtIoctlMap(context, fileObject, Request);

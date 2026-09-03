@@ -21,6 +21,32 @@
 // string. Stable ASIC-ID-based identity is a later milestone (spec mapping).
 static volatile LONG g_TtNextOrdinal = -1;
 
+// DD-17: DMA-buffer ceiling from the service's Parameters key, in MiB.
+// Missing value = built-in default; 0 = unlimited.
+static UINT64
+TtReadDmaBufLimitBytes(
+    _In_ WDFDRIVER Driver
+    )
+{
+    WDFKEY key = NULL;
+    ULONG mib = TT_DMA_BUF_DEFAULT_LIMIT_MIB;
+    DECLARE_CONST_UNICODE_STRING(valueName, TT_DMA_BUF_LIMIT_VALUE_NAME);
+    NTSTATUS status;
+
+    status = WdfDriverOpenParametersRegistryKey(Driver, KEY_READ,
+                                                WDF_NO_OBJECT_ATTRIBUTES, &key);
+    if (NT_SUCCESS(status)) {
+        ULONG value = 0;
+
+        status = WdfRegistryQueryULong(key, &valueName, &value);
+        if (NT_SUCCESS(status)) {
+            mib = value;
+        }
+        WdfRegistryClose(key);
+    }
+    return (UINT64)mib << 20;
+}
+
 _Use_decl_annotations_
 NTSTATUS
 TtEvtDeviceAdd(
@@ -37,8 +63,6 @@ TtEvtDeviceAdd(
     DECLARE_UNICODE_STRING_SIZE(refString, 16);
     LONG ordinal;
     NTSTATUS status;
-
-    UNREFERENCED_PARAMETER(Driver);
 
     WdfDeviceInitSetIoType(DeviceInit, WdfDeviceIoBuffered);
 
@@ -77,6 +101,7 @@ TtEvtDeviceAdd(
     context = TtGetDeviceContext(device);
     context->Device = device;
     InitializeListHead(&context->FileList);
+    context->DmaBufLimitBytes = TtReadDmaBufLimitBytes(Driver);
 
     // reset_rwsem parity (DD-9): serializes RESET_DEVICE (exclusive) against
     // all other ioctls and mapping ops (shared).
@@ -167,8 +192,12 @@ TtEvtDeviceAdd(
         return status;
     }
 
+    // DD-15: visible to the process-exit callback from now on.
+    TtDeviceListRegister(context);
+
     TraceLoggingWrite(g_TtTraceProvider, "DeviceAdded",
-                      TraceLoggingInt32(ordinal, "ordinal"));
+                      TraceLoggingInt32(ordinal, "ordinal"),
+                      TraceLoggingUInt64(context->DmaBufLimitBytes, "dmaBufLimitBytes"));
     return STATUS_SUCCESS;
 }
 
@@ -188,6 +217,11 @@ TtEvtDeviceFileCreate(
     // check detached (analysis §03 open question) — a create during removal
     // succeeds and every subsequent operation fails; we mirror that.
     fileContext->OpenResetGen = ReadAcquire64(&context->ResetGen);
+
+    // DD-15: the opener owns this handle's user mappings and pins. Create
+    // runs in the opener's context.
+    fileContext->CreatorProcess = PsGetCurrentProcess();
+    ObReferenceObject(fileContext->CreatorProcess);
 
     status = TtFileContextInitMemory(FileObject);
 
@@ -257,6 +291,13 @@ TtEvtFileCleanup(
     if (fileContext->PowerContributes) {
         fileContext->PowerContributes = FALSE;
         TtPowerAggregate(context);
+    }
+
+    // Delisted above, so the process-exit callback can no longer reach this
+    // handle; the creator reference can go.
+    if (fileContext->CreatorProcess != NULL) {
+        ObDereferenceObject(fileContext->CreatorProcess);
+        fileContext->CreatorProcess = NULL;
     }
 }
 
@@ -750,6 +791,8 @@ TtEvtDeviceContextCleanup(
     )
 {
     PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
+
+    TtDeviceListUnregister(context);
 
     if (context->ResetResourceInit) {
         ExDeleteResourceLite(&context->ResetResource);

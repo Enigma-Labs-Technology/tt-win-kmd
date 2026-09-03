@@ -65,7 +65,9 @@
            (observed live: StartService error 1450 on a host with
            DeviceGuard\Scenarios\KernelShadowStacks Enabled=1). Plain C KMDF
            code with no stack switching is shadow-stack safe. -->
-      <AdditionalOptions>/CETCOMPAT %(AdditionalOptions)</AdditionalOptions>
+      <!-- /INTEGRITYCHECK: required for PsSetCreateProcessNotifyRoutineEx
+           (DD-15); the loader then verifies the image signature at load. -->
+      <AdditionalOptions>/CETCOMPAT /INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
     </Link>
     <Inf>
       <TimeStamp>*</TimeStamp>

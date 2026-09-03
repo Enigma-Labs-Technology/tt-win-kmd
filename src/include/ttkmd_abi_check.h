@@ -143,6 +143,8 @@ static_assert(IOCTL_TENSTORRENT_QUERY_MAPPINGS == 0x80FA2008, "CTL code drift");
 static_assert(IOCTL_TENSTORRENT_GET_DRIVER_INFO == 0x80FA2014, "CTL code drift");
 static_assert(IOCTL_TENSTORRENT_EXPORT_TLB_DMABUF == 0x80FA2040, "CTL code drift");
 static_assert(IOCTL_TENSTORRENT_SMC_MSG == 0x80FA2044, "CTL code drift");
+static_assert(IOCTL_TENSTORRENT_FREE_DMA_BUF_EX == 0x80FA2410, "CTL code drift");
+static_assert(sizeof(struct tenstorrent_free_dma_buf_ex) == 8, "free_dma_buf_ex size");
 
 // EXPORT_TLB_DMABUF (nr 16)
 TT_ABI_SIZE(tenstorrent_export_tlb_dmabuf, 32);

@@ -10,6 +10,15 @@
 
 #include "trace.h"
 
+// KeStackAttachProcess/KeUnstackDetachProcess and KAPC_STATE live in ntifs.h,
+// which conflicts with the ntddk.h WDF already includes. Declare the functions
+// with an opaque APC-state pointer; callers pass a suitably-sized aligned
+// buffer (KAPC_STATE is 48 bytes on x64). Used to unmap a mapping from a
+// foreign process on reset (DD-9).
+NTKERNELAPI VOID KeStackAttachProcess(_Inout_ PEPROCESS Process,
+                                      _Out_ PVOID ApcState);
+NTKERNELAPI VOID KeUnstackDetachProcess(_In_ PVOID ApcState);
+
 // Kernel pool tags, unique per subsystem for leak triage (spec: engineering
 // standards). Tags appear reversed in debugger output: 'vDtT' shows as "TtDv".
 #define TT_TAG_DEVICE 'vDtT'
@@ -35,8 +44,8 @@
 // Driver version reported by GET_DRIVER_INFO; tracks the upstream baseline tag
 // (tt-kmd/module.h:19-21; maintenance guide step 5).
 #define TT_VERSION_MAJOR 2
-#define TT_VERSION_MINOR 10
-#define TT_VERSION_PATCH 1
+#define TT_VERSION_MINOR 11
+#define TT_VERSION_PATCH 0
 
 // TLB pool geometry (tt-kmd/blackhole.c:20-28): 202 2M windows (id 201 kernel-
 // reserved) + up to 8 4G windows, clamped by BAR4 length at init.
@@ -52,6 +61,17 @@
 
 #define TT_MAX_DMA_BUF_SIZE (1ull << 28)   // MAX_DMA_BUF_SIZE_LOG2=28, memory.h:10
 
+// DD-17: per-device ceiling on outstanding DMA-buffer memory across all
+// handles. Linux has no equivalent; on Windows the buffers are nonpaged,
+// physically contiguous common buffers that any device user can request, so
+// an ordinary user must not be able to exhaust the kernel. Overridable via
+// the service's Parameters\DmaBufferLimitMiB registry value (0 = unlimited).
+#define TT_DMA_BUF_DEFAULT_LIMIT_MIB 4096u
+#define TT_DMA_BUF_LIMIT_VALUE_NAME  L"DmaBufferLimitMiB"
+
+// Storage for a KAPC_STATE used by cross-process unmapping (KeStackAttachProcess).
+#define TT_KAPC_STATE_QWORDS 8   // >= sizeof(KAPC_STATE), 8-byte aligned
+
 // Pool tags per subsystem
 #define TT_TAG_MAPPING 'pMtT'
 #define TT_TAG_PINNING 'nPtT'
@@ -60,6 +80,17 @@
 // Per-device context. Maps to: tt-kmd struct tenstorrent_device (device.h:21).
 typedef struct _TT_DEVICE_CONTEXT {
     WDFDEVICE Device;
+
+    // DD-15: membership in the driver-global device list (g_TtDeviceList),
+    // walked by the process-exit callback to release a dying process's
+    // mappings and pins in its own context. Guarded by g_TtDeviceListLock.
+    LIST_ENTRY DriverLink;
+    BOOLEAN OnDriverList;
+
+    // DD-17: DMA-buffer accounting. DmaBufBytes is updated with interlocked
+    // operations; DmaBufLimitBytes is fixed at DeviceAdd (0 = unlimited).
+    volatile LONG64 DmaBufBytes;
+    UINT64 DmaBufLimitBytes;
 
     // PCI identity captured in EvtDevicePrepareHardware (enumerate.c probe
     // parity). All zero for the ROOT\TTKMD_SOFT test device.
@@ -185,6 +216,15 @@ typedef struct _TT_DEVICE_CONTEXT {
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(TT_DEVICE_CONTEXT, TtGetDeviceContext)
 
+// One coherent DMA buffer (tt-kmd struct dmabuf).
+typedef struct _TT_DMABUF {
+    WDFCOMMONBUFFER Buffer;
+    UINT32 Size;
+    UINT32 Index;            // buf_index slot in the owning file context
+    UINT64 Logical;          // device (bus) address, valid in any DMA domain
+    LONG IatuRegion;         // -1 = none
+} TT_DMABUF, *PTT_DMABUF;
+
 // One user-mode mapping created by IOCTL_TENSTORRENT_MAP (DD-8). The MDL is a
 // physical-page MDL (device BAR pages or a common buffer's contiguous pages),
 // not a pool MDL — MmBuildMdlForNonPagedPool cannot describe either.
@@ -195,26 +235,25 @@ typedef struct _TT_USER_MAPPING {
     SIZE_T Length;
     LONG TlbId;              // -1 unless this maps a TLB window (FREE_TLB -EBUSY)
     BOOLEAN IsDmaBuf;        // DMA-buffer maps are NOT zapped on reset (Linux parity)
+    PTT_DMABUF DmaBuf;       // the buffer behind a DMA-buffer view (FREE_DMA_BUF_EX -EBUSY)
     PEPROCESS Process;       // creator; needed to unmap from the right address space
 } TT_USER_MAPPING, *PTT_USER_MAPPING;
 
 struct tenstorrent_noc_tlb_config;
 
 // One pinned user range from PIN_PAGES (tt-kmd struct pinned_page_range).
+// DD-16: a range inside a MAP view of one of the handle's own DMA buffers is
+// "backed": no pages are probed or locked and the device address comes from
+// the common buffer, so it works in translated DMA domains and leaves nothing
+// locked in the process.
 typedef struct _TT_PINNING {
     LIST_ENTRY Entry;
     UINT64 VirtualAddress;   // original pin VA (match key for UNPIN)
     UINT64 Size;
-    PMDL Mdl;                // probe-and-locked
+    PMDL Mdl;                // probe-and-locked; NULL when BackingDmaBuf != NULL
+    PTT_DMABUF BackingDmaBuf;
     LONG IatuRegion;         // -1 = none
 } TT_PINNING, *PTT_PINNING;
-
-// One coherent DMA buffer (tt-kmd struct dmabuf).
-typedef struct _TT_DMABUF {
-    WDFCOMMONBUFFER Buffer;
-    UINT32 Size;
-    LONG IatuRegion;         // -1 = none
-} TT_DMABUF, *PTT_DMABUF;
 
 // Per-open-handle context. Maps to: tt-kmd struct chardev_private
 // (chardev_private.h): reset-generation latch (chardev.c:812), dmabufs,
@@ -228,6 +267,11 @@ typedef struct _TT_FILE_CONTEXT {
     LIST_ENTRY DeviceLink;   // membership in TT_DEVICE_CONTEXT.FileList
     WDFFILEOBJECT FileObject;
     BOOLEAN OnDeviceList;
+
+    // DD-15: the process that opened the handle (referenced). MAP/UNMAP/
+    // PIN_PAGES/UNPIN_PAGES are only honoured from this process, and the
+    // process-exit callback releases whatever it still owns.
+    PEPROCESS CreatorProcess;
 
     // M5: resource locks this handle holds (priv->resource_lock parity) and
     // this handle's power-state contribution.
@@ -283,9 +327,24 @@ NTSTATUS TtIoctlPinPages(_In_ PTT_DEVICE_CONTEXT Context,
                          _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
 NTSTATUS TtIoctlUnpinPages(_In_ PTT_DEVICE_CONTEXT Context,
                            _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
+NTSTATUS TtIoctlFreeDmaBufEx(_In_ PTT_DEVICE_CONTEXT Context,
+                             _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
 VOID TtMemoryFileCleanup(_In_ PTT_DEVICE_CONTEXT Context,
                          _In_ WDFFILEOBJECT FileObject);
+// DD-15: releases a process's mappings and pins from inside that process
+// (process-exit callback). Caller holds Context->FileListLock.
+VOID TtMemoryProcessExit(_In_ PTT_DEVICE_CONTEXT Context,
+                         _In_ PTT_FILE_CONTEXT FileContext);
+// Unmaps and frees one user mapping, attaching to the creating process when
+// the caller runs elsewhere (reset zap, cleanup through a duplicated handle).
+VOID TtDestroyUserMapping(_In_ PTT_USER_MAPPING Mapping);
 NTSTATUS TtFileContextInitMemory(_In_ WDFFILEOBJECT FileObject);
+
+// driver.c: driver-global device list for the process-exit callback (DD-15).
+extern LIST_ENTRY g_TtDeviceList;
+extern WDFWAITLOCK g_TtDeviceListLock;
+VOID TtDeviceListRegister(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtDeviceListUnregister(_In_ PTT_DEVICE_CONTEXT Context);
 
 // ioctl.c helpers shared with memory.c
 NTSTATUS TtCopyInBuffer(_In_ WDFREQUEST Request,
