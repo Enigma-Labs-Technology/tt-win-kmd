@@ -1,9 +1,22 @@
 # tt-win-kmd — Windows KMDF port of the Tenstorrent kernel-mode driver
 
-> **Developer preview.** This driver has run on one p150a and on the
-> ttsim/QEMU rig. It is test-signed, it can crash your machine, and it is not
-> produced or supported by Tenstorrent. Use it on a development host, not on
-> a machine you depend on. See `CHANGELOG.md` for what is and is not there.
+> **⚠️ NOT PRODUCTION READY — UNFINISHED WORK IN PROGRESS — NO WARRANTY.**
+>
+> This is an incomplete, experimental port under active development. It is
+> **not** finished, **not** stable, and **not** suitable for production or for
+> any machine you depend on. The driver is test-signed, runs in kernel mode,
+> and **can crash, hang, or corrupt your system**, and it may leave the
+> attached hardware in a state that requires a power cycle. It has only been
+> exercised on a single p150a board and on the ttsim/QEMU rig. Interfaces,
+> behaviour, and documentation may change without notice.
+>
+> This software is provided **"AS IS", WITHOUT WARRANTY OF ANY KIND**, express
+> or implied, including but not limited to the warranties of merchantability,
+> fitness for a particular purpose, and non-infringement. In no event shall the
+> authors be liable for any claim, damages, or other liability arising from its
+> use. **You use it entirely at your own risk.** It is a community effort and is
+> **not produced, endorsed, or supported by Tenstorrent.** See `LICENSE` for
+> the governing terms and `CHANGELOG.md` for what is and is not there.
 
 Windows port of [tt-kmd](https://github.com/tenstorrent/tt-kmd) for Blackhole
 PCIe AI accelerators. Target hardware for this release line is the **p150a**
