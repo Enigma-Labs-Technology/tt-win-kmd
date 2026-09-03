@@ -1,6 +1,6 @@
 # Maintenance Guide — tracking upstream tt-kmd
 
-This port is pinned to upstream tag `ttkmd-2.10.0-rc1` (commit `8c32c2b`, sibling
+This port is pinned to upstream tag `ttkmd-2.11.0` (commit `c05f224`, sibling
 checkout `../tt-kmd`). Every document and source comment cites file:line against
 that tag. This guide is the procedure for absorbing a new upstream tag.
 
@@ -9,8 +9,8 @@ that tag. This guide is the procedure for absorbing a new upstream tag.
 ```bash
 cd ../tt-kmd
 git fetch --tags origin
-git diff ttkmd-2.10.0-rc1..<new-tag> --stat
-git diff ttkmd-2.10.0-rc1..<new-tag> -- ioctl.h        # ABI first
+git diff ttkmd-2.11.0..<new-tag> --stat
+git diff ttkmd-2.11.0..<new-tag> -- ioctl.h        # ABI first
 ```
 
 Triage order (highest blast radius first):

@@ -1,0 +1,27 @@
+tt-win-kmd: Windows KMDF port of the Tenstorrent kernel-mode driver
+====================================================================
+
+This repository is a derivative work of tt-kmd, the Linux kernel driver for
+Tenstorrent AI accelerators:
+
+    https://github.com/tenstorrent/tt-kmd
+    Copyright (c) Tenstorrent Inc.
+    SPDX-License-Identifier: GPL-2.0-only
+
+The driver sources under src/driver and the shared ABI headers under
+src/include port tt-kmd's structures, protocols and behaviour to Windows and
+are therefore licensed under the GNU General Public License version 2 only,
+the same terms as tt-kmd. See LICENSE for the full text.
+
+The user-mode compatibility shim (src/ttwin_compat), the test programs
+(src/tests) and the tooling under tools/ and test/ are original to this
+repository and are also released under GPL-2.0-only so that the whole tree is
+distributed under one licence.
+
+Upstream baseline: tt-kmd tag ttkmd-2.11.0 (commit c05f224). The unmodified
+upstream licence and notice files are preserved in third_party/tt-kmd/.
+
+This is a community port. It is not produced, endorsed or supported by
+Tenstorrent Inc. "Tenstorrent", "Blackhole" and "Wormhole" are trademarks of
+Tenstorrent Inc. and are used here only to identify the hardware the driver
+targets.

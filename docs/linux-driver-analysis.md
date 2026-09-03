@@ -1,5 +1,23 @@
 # tt-kmd Linux Driver Analysis — Master Document (Windows Port Baseline)
 
+> **Baseline note (2026-09-03):** this analysis was written against
+> `ttkmd-2.10.0-rc1-1-g8c32c2b`. The port has since been rebased to
+> `ttkmd-2.11.0` (commit `c05f224`, 45 commits later). The ABI delta is one new
+> request, `SMC_MSG` (nr 17, `struct tenstorrent_smc_msg`, 48 bytes); no
+> existing structure changed (`docs/abi-ground-truth.txt` regenerated). Behaviour
+> deltas worth knowing when reading the cited line numbers below: `FREE_DMA_BUF`
+> now has a handler (`memory.c ioctl_free_dma_buf`); ARC messaging is serialized
+> through a per-device `arc_msg_mutex` and gained the asynchronous per-fd pump
+> (`msgqueue.c arc_msg_pump`); `SET_POWER_STATE` propagates ARC errors; a
+> `tlb_mutex` breaks an mmap_lock deadlock cycle; remove-time fd cleanup is
+> serialized against open/close; the streaming DMA mask is capped at 58 bits;
+> `blackhole_init()` checks BAR2 mapping failure; telemetry entry counts are
+> validated and scans yield; Blackhole firmware logs are forwarded to the kernel
+> log and a cable fault is reported at probe; `fan_rpm` reads N/A when fan
+> control is disabled. File:line citations below still refer to the 2.10.0-rc1
+> sources unless marked otherwise.
+
+
 | | |
 |---|---|
 | **Upstream baseline** | tt-kmd tag `ttkmd-2.10.0-rc1-1-g8c32c2b` (commit `8c32c2b`) |

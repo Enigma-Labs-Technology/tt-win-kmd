@@ -185,5 +185,38 @@ and tt-kmd's own hardware tests don't cover them on BH.
 (blackhole.c). No code change made — parity with Linux is preserved; the
 flavors are operationally contraindicated on real BH (ladder + matrix note).
 
-**Status:** OPEN — needs upstream/Tenstorrent clarification whether flavors
-2/4 are supported on Blackhole silicon at all.
+**Status:** OPEN upstream; mitigated in the driver by DD-14 (flavors 2/4 are
+refused on physical devices and kept only for the ttsim/QEMU model).
+
+## OQ-8: SMC_MSG (tt-kmd 2.11.0) is stubbed — OPEN
+
+Upstream 2.11.0 added `TENSTORRENT_IOCTL_SMC_MSG`: a per-fd asynchronous ARC
+message with POST/POLL/ABANDON, multiplexed by a device-wide pump
+(`msgqueue.c arc_msg_pump`, per-device `arc_msg_mutex`). The Windows driver
+carries the ABI (`ttkmd_ioctl.h`, static-asserted) and returns
+`STATUS_NOT_SUPPORTED`, the mapping of the `-EOPNOTSUPP` upstream reports for
+a device without a usable queue. The checked-out tt-umd does not issue it.
+Porting it means: per-file message state, a device queue, and a pump that also
+flushes in-flight user messages before the driver's own synchronous messages
+(`TtBhSendArcMessage`). Kernel-side work that must be built and exercised on
+the rig before it ships.
+
+## OQ-9: FREE_DMA_BUF, MAP_PEER_BAR and EXPORT_TLB_DMABUF remain unimplemented — OPEN (low priority)
+
+`FREE_DMA_BUF` gained a real handler upstream in 2.10.0; Windows still answers
+-EINVAL and releases buffers at handle close. tt-umd never calls it, and the
+Windows sysmem path (DD-13) allocates per handle, so nothing is blocked.
+`MAP_PEER_BAR` needs a second device and a Windows-native peer identity;
+`EXPORT_TLB_DMABUF` has no Windows equivalent. Revisit when a consumer appears.
+
+## OQ-10: Sysmem capacity on Windows is capped at 256 MiB per channel — OPEN
+
+`TT_MAX_DMA_BUF_SIZE` (2^28) bounds what tt-umd can obtain per channel, and a
+contiguous 1 GiB common buffer is unlikely to be available on a booted host
+even if the cap were lifted. Options: (a) a boot-start reservation of N x 1 GiB
+common buffers handed out to the first opener (the Linux hugepage analogue);
+(b) a registry parameter for the reservation size; (c) keep 256 MiB and let
+tt-metal size its command queues from the reported channel size. (c) is what
+ships now. Measure whether tt-metal workloads on a p150a are limited by it
+before doing (a).
+

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/chardev.c ioctl dispatch (tt_cdev_ioctl, chardev.c:591-706)
 // and the M1 handlers: ioctl_get_device_info (chardev.c:128-160),
 // ioctl_get_driver_info, ioctl_query_mappings (memory.c:340-410).
@@ -462,9 +465,19 @@ TtEvtIoDeviceControl(
     case 13:
         status = TtIoctlConfigureTlb(context, fileObject, Request);
         break;
+    case 17:
+        // SMC_MSG (tt-kmd 2.11.0, chardev.c ioctl_arc_msg): asynchronous
+        // per-handle ARC messaging multiplexed over the firmware queue. Not
+        // ported yet; Linux reports -EOPNOTSUPP for a device without a usable
+        // queue, which is the closest honest answer until the pump lands
+        // (docs/open-questions.md OQ-8). No buffer is read.
+        status = STATUS_NOT_SUPPORTED;
+        break;
     default:
-        // Linux: unhandled commands (incl. GET_HARVESTING, FREE_DMA_BUF and
-        // all not-yet-ported nrs) fall through to -EINVAL (chardev.c:694-696).
+        // Linux: unhandled commands (incl. GET_HARVESTING and all
+        // not-yet-ported nrs) fall through to -EINVAL (chardev.c:694-696).
+        // FREE_DMA_BUF (nr 4) gained a handler in tt-kmd 2.10.0; the Windows
+        // port still releases DMA buffers at handle close only (OQ-9).
         status = STATUS_INVALID_PARAMETER;
         break;
     }

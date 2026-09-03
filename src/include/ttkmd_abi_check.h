@@ -1,10 +1,13 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: docs/abi-ground-truth.txt (generated from tt-kmd/ioctl.h by gcc).
 //
 // Compile-time enforcement that the Windows ABI structs are byte-identical to
 // the Linux ones. Include from at least one driver TU and one user-mode test TU.
 // Values are copied verbatim from docs/abi-ground-truth.txt (baseline
-// ttkmd-2.10.0-rc1-1-g8c32c2b); regenerate with tools/gen_abi_truth.sh on every
-// upstream rebase and update here (maintenance guide step 2).
+// ttkmd-2.11.0); regenerate with tools/gen_abi_truth.sh on every upstream
+// rebase and update here (maintenance guide step 2).
 
 #ifndef TTKMD_ABI_CHECK_H_INCLUDED
 #define TTKMD_ABI_CHECK_H_INCLUDED
@@ -139,6 +142,24 @@ static_assert(IOCTL_TENSTORRENT_GET_DEVICE_INFO == 0x80FA2000, "CTL code drift")
 static_assert(IOCTL_TENSTORRENT_QUERY_MAPPINGS == 0x80FA2008, "CTL code drift");
 static_assert(IOCTL_TENSTORRENT_GET_DRIVER_INFO == 0x80FA2014, "CTL code drift");
 static_assert(IOCTL_TENSTORRENT_EXPORT_TLB_DMABUF == 0x80FA2040, "CTL code drift");
+static_assert(IOCTL_TENSTORRENT_SMC_MSG == 0x80FA2044, "CTL code drift");
+
+// EXPORT_TLB_DMABUF (nr 16)
+TT_ABI_SIZE(tenstorrent_export_tlb_dmabuf, 32);
+TT_ABI_FIELD(tenstorrent_export_tlb_dmabuf, argsz, 0, 4);
+TT_ABI_FIELD(tenstorrent_export_tlb_dmabuf, flags, 4, 4);
+TT_ABI_FIELD(tenstorrent_export_tlb_dmabuf, tlb_id, 8, 4);
+TT_ABI_FIELD(tenstorrent_export_tlb_dmabuf, fd, 12, 4);
+TT_ABI_FIELD(tenstorrent_export_tlb_dmabuf, offset, 16, 8);
+TT_ABI_FIELD(tenstorrent_export_tlb_dmabuf, size, 24, 8);
+
+// SMC_MSG (nr 17, tt-kmd 2.11.0)
+TT_ABI_SIZE(tenstorrent_smc_msg, 48);
+TT_ABI_FIELD(tenstorrent_smc_msg, argsz, 0, 4);
+TT_ABI_FIELD(tenstorrent_smc_msg, flags, 4, 4);
+TT_ABI_FIELD(tenstorrent_smc_msg, queue_index, 8, 4);
+TT_ABI_FIELD(tenstorrent_smc_msg, reserved0, 12, 4);
+TT_ABI_FIELD(tenstorrent_smc_msg, message, 16, 32);
 
 #undef TT_ABI_SIZE
 #undef TT_ABI_FIELD

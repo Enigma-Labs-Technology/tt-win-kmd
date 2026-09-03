@@ -1,6 +1,6 @@
 # IOCTL Parity Matrix
 
-Windows ABI parity with tt-kmd (`ioctl.h`, baseline `ttkmd-2.10.0-rc1-1-g8c32c2b`).
+Windows ABI parity with tt-kmd (`ioctl.h`, baseline `ttkmd-2.11.0`, commit `c05f224`).
 Struct sizes/offsets are gcc x86_64 ground truth from `docs/abi-ground-truth.txt`
 (regenerate with `tools/gen_abi_truth.sh`); the Windows header must `static_assert`
 identical values.
@@ -44,9 +44,9 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | 1 | GET_HARVESTING | `0x80FA2004` | no struct; Linux has NO handler — falls to default -EINVAL (chardev.c:631-632, 694-696) | BUFFERED | -EINVAL → STATUS_INVALID_PARAMETER | **tested** (stub parity asserted by ttinfo) |
 | 2 | QUERY_MAPPINGS | `0x80FA2008` | `tenstorrent_query_mappings` (8/N×24/8+flex) | BUFFERED | packed UC/WC pairs for existing BARs; min(count,valid) copied + zero-fill (memory.c:393-406) | **tested** (M1, incl. count 0/2/6/16) |
 | 3 | ALLOCATE_DMA_BUF | `0x80FA200C` | `tenstorrent_allocate_dma_buf` (24/40/64) | BUFFERED | WdfCommonBuffer; validation order per memory.c:439-458; iATU-before-free | **tested** (M3) |
-| 4 | FREE_DMA_BUF | `0x80FA2010` | no struct (zero-length buffers) | BUFFERED | upstream stub: unconditional -EINVAL (memory.c:515-523) | **tested** (M3) |
+| 4 | FREE_DMA_BUF | `0x80FA2010` | `tenstorrent_free_dma_buf` (upstream 2.10.0+) | BUFFERED | upstream gained a real handler in 2.10.0 (`ioctl_free_dma_buf`); Windows still returns -EINVAL and frees buffers at handle close. tt-umd never issues it (OQ-9) | **stub** (behaviour drift vs 2.11.0) |
 | 5 | GET_DRIVER_INFO | `0x80FA2014` | `tenstorrent_get_driver_info` (4/12/16) | BUFFERED | baseline | **tested** (M1) |
-| 6 | RESET_DEVICE | `0x80FA2018` | `tenstorrent_reset_device` (8/8/16) | BUFFERED | 7-flavor dispatch; out.result=!ok; gen-bump → STATUS_DEVICE_REMOVED on stale handles; needs_hw_init window; VMA-zap (DD-9) | **tested** (M4) |
+| 6 | RESET_DEVICE | `0x80FA2018` | `tenstorrent_reset_device` (8/8/16) | BUFFERED | 7-flavor dispatch; flavors 2 (CONFIG_WRITE) and 4 (ASIC_RESET) are refused on physical devices (DD-14, silicon D4 wedge) and kept only for the all-zero-subsystem ttsim/QEMU model; out.result=!ok; gen-bump → STATUS_DEVICE_REMOVED on stale handles; needs_hw_init window; VMA-zap (DD-9) | **tested** (M4) |
 | 7 | PIN_PAGES | `0x80FA201C` | `tenstorrent_pin_pages` (24/8/32); extended out (16) via output_size_bytes | BUFFERED | MmProbeAndLockPages + PFN-contiguity (direct path); READ_ONLY→NOT_SUPPORTED (no driver IOMMU domain, DD-8) | **functional** (M3; direct path tested, RO negative) |
 | 8 | LOCK_CTL | `0x80FA2020` | `tenstorrent_lock_ctl` (12/4/16) | BUFFERED | 64 locks; ACQUIRE_BLOCKING = cancellable pended request (manual WDFQUEUE); stale-gen/detached waiter → STATUS_DEVICE_REMOVED; CancelSynchronousIo → STATUS_CANCELLED | **tested** (M5) |
 | 9 | MAP_PEER_BAR | `0x80FA2024` | `tenstorrent_map_peer_bar` (24/16/40) | BUFFERED | `peer_fd` (u32) carries a Windows HANDLE value of the peer device file; resolved via ObReferenceObjectByHandle — 64-bit handle truncation concern, see OQ (to file) | not-started |
@@ -57,6 +57,7 @@ a user VA *by value* inside the struct — the driver probes/locks it explicitly
 | 14 | SET_NOC_CLEANUP | `0x80FA2038` | `tenstorrent_set_noc_cleanup` (32, argsz protocol) | BUFFERED | per-handle NOC write at close (skipped if detached); argsz/noc/addr-align/x-y validation | **tested** (M6) |
 | 15 | SET_POWER_STATE | `0x80FA203C` | `tenstorrent_power_state` (40, argsz protocol) | BUFFERED | multi-client aggregate (flags OR + unspecified-ON, settings max) → ARC POWER_SETTING; argsz/flags/validity validation | **tested** (M5) |
 | 16 | EXPORT_TLB_DMABUF | `0x80FA2040` | `tenstorrent_export_tlb_dmabuf` (32, argsz protocol) | BUFFERED | **design-pending:** dma-buf fd has no Windows equivalent; Linux consumer is RDMA P2P (`ibv_reg_dmabuf_mr`). Candidate: not supported initially → STATUS_NOT_SUPPORTED, revisit if tt-umd-on-Windows needs it | not-started |
+| 17 | SMC_MSG | `0x80FA2044` | `tenstorrent_smc_msg` (48, argsz protocol) | BUFFERED | new in tt-kmd 2.11.0: per-handle asynchronous ARC messaging (POST/POLL/ABANDON) multiplexed over the firmware queue. Windows returns STATUS_NOT_SUPPORTED (Linux -EOPNOTSUPP for a device without a usable queue) without reading the buffer; ABI carried and static-asserted (OQ-8) | **stub** |
 
 ## Windows-only extensions (no Linux nr; function codes from 0x900)
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/ioctl.h (Windows ABI surface — M0 subset: GUIDs + CTL_CODE scheme)
 //
 // Shared between the driver and user mode. The full ioctl set lands milestone by
@@ -52,6 +55,7 @@ DEFINE_GUID(GUID_DEVINTERFACE_TENSTORRENT,
 #define IOCTL_TENSTORRENT_SET_NOC_CLEANUP   TT_CTL(14)  // struct tenstorrent_set_noc_cleanup
 #define IOCTL_TENSTORRENT_SET_POWER_STATE   TT_CTL(15)
 #define IOCTL_TENSTORRENT_EXPORT_TLB_DMABUF TT_CTL(16)
+#define IOCTL_TENSTORRENT_SMC_MSG           TT_CTL(17)  // tt-kmd 2.11.0 (ioctl.h:31)
 
 // Mapping tokens returned by QUERY_MAPPINGS (tt-kmd/ioctl.h:33-39). The
 // mapping_base values are the Linux mmap-offset-space tokens ((0..5)<<36,
@@ -351,6 +355,37 @@ struct tenstorrent_reset_device_out {
 struct tenstorrent_reset_device {
     struct tenstorrent_reset_device_in in;
     struct tenstorrent_reset_device_out out;
+};
+
+// --- EXPORT_TLB_DMABUF (nr 16), tt-kmd/ioctl.h:376-457 ---
+// Linux exports a TLB window as a dma-buf fd for RDMA peer-to-peer. There is no
+// Windows equivalent; the layout is carried for ABI parity and the driver
+// returns STATUS_NOT_SUPPORTED.
+struct tenstorrent_export_tlb_dmabuf {
+    uint32_t argsz;            // must == sizeof(struct) = 32
+    uint32_t flags;            // must == 0
+    uint32_t tlb_id;
+    int32_t  fd;               // out (Linux only)
+    uint64_t offset;
+    uint64_t size;
+};
+
+// --- SMC_MSG (nr 17), tt-kmd/ioctl.h:459-505 (added in 2.11.0) ---
+// Asynchronous per-handle ARC (system management controller) message exchange.
+// The driver multiplexes one firmware queue across all handles; each handle may
+// have one message outstanding. POST submits, POLL collects (or -EAGAIN while
+// pending, -ESRCH with nothing outstanding), ABANDON cancels. Devices without a
+// usable queue report -EOPNOTSUPP.
+#define TENSTORRENT_SMC_MSG_POST    (1u << 0)
+#define TENSTORRENT_SMC_MSG_POLL    (1u << 1)
+#define TENSTORRENT_SMC_MSG_ABANDON (1u << 2)
+
+struct tenstorrent_smc_msg {
+    uint32_t argsz;            // must == sizeof(struct) = 48
+    uint32_t flags;            // exactly one of TENSTORRENT_SMC_MSG_*
+    uint32_t queue_index;      // must == 0
+    uint32_t reserved0;        // must == 0
+    uint32_t message[8];       // request on POST, response on successful POLL
 };
 
 // --- Windows extensions: MAP/UNMAP (function codes 0x900+, DD-8) ------------
