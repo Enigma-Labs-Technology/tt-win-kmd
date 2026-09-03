@@ -339,3 +339,46 @@ regardless of BME or IOMMU state).
 - **Telemetry post-reset gate.** In the needs_hw_init window QUERY_TELEMETRY
   returns STATUS_DEVICE_NOT_READY (Linux -ENODATA, telemetry.c:23-24) instead
   of DEVICE_REMOVED, so pollers see a transient (analysis §10 porting note).
+
+## DD-13: Windows sysmem is carved from driver DMA buffers and pinned bottom-up (tt-umd backend)
+
+**Context.** tt-umd backs sysmem with hugetlbfs pages when no IOMMU is active,
+or with one anonymous mapping pinned through the IOMMU otherwise, and tt-metal
+hard-codes the NOC address of channel 0 as `pcie_base`. Windows has no
+hugetlbfs, user allocations are not physically contiguous, and this driver does
+not hand raw PFNs to the iATU inside a DMA-remapped domain.
+
+**Decision.** The Windows backend of tt-kmd-lib allocates each channel with
+`ALLOCATE_DMA_BUF` (index 1 upwards; index 0 remains the PCIe DMA engine
+buffer), maps it with `MAP`, and pins the view with
+`PIN_PAGES(CONTIGUOUS | NOC_DMA)`. Because `PIN_PAGES` allocates the NOC
+aperture bottom-up while `ALLOCATE_DMA_BUF`'s own NOC option is top-down, this
+is the only sequence that puts channel 0 at `pcie_base` without a driver
+change. The channel size is negotiated downwards from `TT_MAX_DMA_BUF_SIZE`
+(256 MiB) to 16 MiB; below 1 GiB only one channel is used.
+
+**Consequences.** `PIN_PAGES` must keep accepting user VAs that are `MAP`
+views of common buffers (silicon rung e). A boot-time 1 GiB reservation and a
+larger `TT_MAX_DMA_BUF_SIZE` are the path to Linux-equivalent capacity (OQ-10).
+`FREE_DMA_BUF` stays unimplemented because tt-umd releases buffers by closing
+the handle (OQ-9).
+
+## DD-14: Reset flavors 2 and 4 are refused on physical hardware
+
+**Context.** The silicon ladder (docs/test-reports/real-silicon.md, D4) showed
+that the DWC interface-timer trigger behind `CONFIG_WRITE` (2) and `ASIC_RESET`
+(4) takes a p150a's link down until a cold power cycle, later followed by a
+WHEA 0x124 on the host. OQ-7 asks upstream whether these flavors are meant to
+work on Blackhole at all; no answer changes the observed outcome.
+
+**Decision.** `TtIoctlResetDevice` refuses flavors 2 and 4 with `out.result = 1`
+and a `ResetFlagRefusedOnSilicon` trace event unless the device reports an
+all-zero PCI subsystem identity, which only the ttsim/QEMU model does. The
+lifecycle tests on the rig keep exercising the code path; a real card cannot
+be wedged from user mode.
+
+**Consequences.** tt-umd's warm-reset helper, which issues `CONFIG_WRITE` on
+Linux, reports failure on Windows silicon instead of hanging the machine.
+`ASIC_DMC_RESET` (5), `USER_RESET` (3), `RESTORE_STATE` (0) and `POST_RESET`
+(6) are unchanged.
+

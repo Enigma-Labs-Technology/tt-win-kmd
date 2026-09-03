@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // Maps to: tt-kmd/chardev.c ioctl_reset_device (chardev.c:200-310) +
 // tt-kmd/pcie.c reset primitives + blackhole.c blackhole_reset/init_hardware.
 // The seven reset flavors, fd-generation invalidation, the needs_hw_init reset
@@ -446,6 +449,32 @@ TtBumpResetGen(
 // held EXCLUSIVE by the dispatcher.
 // ---------------------------------------------------------------------------
 
+
+// Reset flavors that wedged a real Blackhole (docs/test-reports/real-silicon.md
+// D4: CONFIG_WRITE and ASIC_RESET left the link down until a cold power cycle)
+// are refused on physical hardware. The ttsim/QEMU model, which is the only
+// device with an all-zero PCI subsystem ID, keeps them for the lifecycle tests.
+static BOOLEAN
+TtResetLegacyFlagPermitted(
+    _In_ PTT_DEVICE_CONTEXT Context,
+    _In_ UINT32 Flags
+    )
+{
+    BOOLEAN simulated = (Context->SubsysVendorId == 0 && Context->SubsysId == 0);
+
+    if (Flags != TENSTORRENT_RESET_DEVICE_CONFIG_WRITE &&
+        Flags != TENSTORRENT_RESET_DEVICE_ASIC_RESET) {
+        return TRUE;
+    }
+    if (simulated) {
+        return TRUE;
+    }
+    TraceLoggingWrite(g_TtTraceProvider, "ResetFlagRefusedOnSilicon",
+                      TraceLoggingUInt32(Flags, "flags"),
+                      TraceLoggingUInt16(Context->SubsysId, "subsysId"));
+    return FALSE;
+}
+
 _Use_decl_annotations_
 NTSTATUS
 TtIoctlResetDevice(
@@ -488,6 +517,14 @@ TtIoctlResetDevice(
         break;
 
     case TENSTORRENT_RESET_DEVICE_CONFIG_WRITE:    // 2 (legacy)
+        // The DWC interface-timer trigger hard-wedged a real p150a until a
+        // cold power cycle (docs/test-reports/real-silicon.md, divergence D4;
+        // DD-14). Only the ttsim/QEMU model, which reports an all-zero
+        // subsystem ID, may still exercise it.
+        if (!TtResetLegacyFlagPermitted(Context, in.flags)) {
+            ok = FALSE;
+            break;
+        }
         TtBumpResetGen(Context, FileObject);
         TtResetZapMappings(Context);
         ok = TtPcieTimerInterrupt(Context);
@@ -503,6 +540,12 @@ TtIoctlResetDevice(
 
     case TENSTORRENT_RESET_DEVICE_ASIC_RESET:      // 4
     case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:  // 5
+        // ASIC_RESET (4) shares the CONFIG_WRITE wedge on silicon (DD-14);
+        // ASIC_DMC_RESET (5) remains available.
+        if (!TtResetLegacyFlagPermitted(Context, in.flags)) {
+            ok = FALSE;
+            break;
+        }
         TtBumpResetGen(Context, FileObject);
         TtResetZapMappings(Context);
         ok = Context->IsBlackhole ? TtBhReset(Context, in.flags) : FALSE;

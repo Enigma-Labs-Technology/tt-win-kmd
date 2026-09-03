@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 tt-win-kmd contributors
+// SPDX-License-Identifier: GPL-2.0-only
+//
 // M1 conformance test for tt-win-kmd: enumerates GUID_DEVINTERFACE_TENSTORRENT
 // instances and exercises GET_DRIVER_INFO / GET_DEVICE_INFO / QUERY_MAPPINGS,
 // positive and negative cases, asserting the Linux-parity semantics from
@@ -235,6 +238,29 @@ static void TestNegative(HANDLE h)
 // M2: telemetry + ARC message round-trip against the ttsim-backed Blackhole
 // (debug ioctl surface; values asserted against ttsim's emulated CMFW state,
 // ttsim tile.cpp telem[] table + heartbeat test-rig patch).
+// The debug IOCTL surface (ttkmd_debug.h) exists only in Debug driver builds.
+// A Release driver answers every debug code with ERROR_INVALID_FUNCTION; the
+// sections that depend on it are then reported as skipped, not failed.
+static BOOL DebugIoctlsAvailable(HANDLE h)
+{
+    static int cached = -1;
+    struct tenstorrent_debug_read_telemetry t;
+    DWORD info;
+    BOOL ok;
+
+    if (cached < 0) {
+        memset(&t, 0, sizeof(t));
+        t.tag_id = 1;
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_READ_TELEMETRY, &t, sizeof(t),
+                     sizeof(t), &info);
+        cached = (!ok && GetLastError() == ERROR_INVALID_FUNCTION) ? 0 : 1;
+        if (!cached) {
+            printf("debug ioctls: unavailable (Release driver); dependent checks skipped\n");
+        }
+    }
+    return cached ? TRUE : FALSE;
+}
+
 static void TestM2Firmware(HANDLE h, int deviceId)
 {
     struct tenstorrent_debug_read_telemetry t;
@@ -242,6 +268,10 @@ static void TestM2Firmware(HANDLE h, int deviceId)
     DWORD info;
     BOOL ok;
     uint32_t hb1, hb2;
+
+    if (!DebugIoctlsAvailable(h)) {
+        return;
+    }
 
     if (deviceId != 0xB140) {
         // Soft device: debug telemetry must report NOT_SUPPORTED (no BH HW).
@@ -799,6 +829,8 @@ static void TestM5(const WCHAR *path, HANDLE h, int deviceId)
 
         // Aggregate: flags OR'd (MAX_AI_CLK | TENSIX_ENABLE plus any legacy
         // default contributors' bits), setting[0] = max(100,250) = 250.
+        // Readback needs the Debug driver's aggregate-power IOCTL.
+        if (DebugIoctlsAvailable(h)) {
         memset(&agg, 0, sizeof(agg));
         ok = TtIoctl(h, IOCTL_TENSTORRENT_DEBUG_GET_AGG_POWER, &agg, sizeof(agg), sizeof(agg), &info);
         CHECK(ok && agg.valid, "agg power gle=%lu valid=%u\n", GetLastError(), agg.valid);
@@ -807,6 +839,7 @@ static void TestM5(const WCHAR *path, HANDLE h, int deviceId)
               "agg flags=%#x (missing OR)\n", agg.power_flags);
         CHECK(agg.power_settings[0] == 250,
               "agg setting[0]=%u (want max 250)\n", agg.power_settings[0]);
+        }
         printf("power: aggregated flags=%#x setting[0]=%u (OR + max) PASS\n",
                agg.power_flags, agg.power_settings[0]);
         CloseHandle(hb);

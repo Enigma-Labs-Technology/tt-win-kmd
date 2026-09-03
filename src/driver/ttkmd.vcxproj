@@ -55,9 +55,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalIncludeDirectories>$(ProjectDir)..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <!-- Debug ioctl surface (ttkmd_debug.h). Remove for release/attestation
-           builds: see docs/signing-and-deployment.md. -->
-      <PreprocessorDefinitions>TT_DEBUG_INTERFACES=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- Debug ioctl surface (ttkmd_debug.h): Debug configuration only, so a
+           Release/attestation build never carries it (docs/signing-and-deployment.md). -->
+      <PreprocessorDefinitions Condition="'$(Configuration)'=='Debug'">TT_DEBUG_INTERFACES=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <!-- Kernel-mode Hardware-enforced Stack Protection (kernel CET shadow
