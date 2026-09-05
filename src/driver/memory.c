@@ -5,8 +5,8 @@
 // allocator, pin/unpin) + tt-kmd/tlb.c (TLB pool) — the M3 subset per DD-8.
 //
 // Process-context requirement: MAP/UNMAP/PIN_PAGES/UNPIN_PAGES are serviced
-// from EvtIoInCallerContext (ioctl.c) so MmMapLockedPagesSpecifyCache and
-// MmProbeAndLockPages act on the calling process, and only from the process
+// from EvtIoInCallerContext (ioctl.c) so user mappings act on the calling
+// address space, and only from the process
 // that opened the handle (DD-15). Cleanup normally runs in that process
 // (IRP_MJ_CLEANUP); when a duplicated handle moves the last close elsewhere,
 // TtDestroyUserMapping attaches to the creator, and the process-exit callback
@@ -99,8 +99,9 @@ TtIoctlAllocateTlb(
         poolStart = 0;
         poolCount = TT_TLB_2M_COUNT;
     } else if (in.size == (1ull << 32)) {
-        poolStart = TT_TLB_2M_COUNT;
-        poolCount = Context->Tlb4gCount;
+        // A full 4 GiB window cannot be represented by the MAP MDL.
+        // Reject before claiming a slot; Windows clients use 2 MiB windows.
+        return STATUS_NOT_SUPPORTED;
     } else {
         return STATUS_INVALID_PARAMETER;   // -EINVAL
     }
@@ -225,9 +226,9 @@ TtIoctlConfigureTlb(
         WdfWaitLockRelease(Context->TlbLock);
         return STATUS_ACCESS_DENIED;       // -EPERM (memory.c:995-996)
     }
-    WdfWaitLockRelease(Context->TlbLock);
-
+    // Ownership and the multiword register update form one transaction.
     status = TtBhConfigureUserTlb(Context, in.id, &in.config);
+    WdfWaitLockRelease(Context->TlbLock);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -379,7 +380,7 @@ TtTeardownNocDma(
     }
 
     WdfWaitLockAcquire(Context->IatuLock, NULL);
-    if (!Context->Detached) {
+    if (Context->HardwareReady && !Context->Detached) {
         (VOID)TtBhConfigureOutboundAtu(Context, (UINT32)Region, 0, 0, 0);
     }
     Context->Iatu[Region].Used = FALSE;
@@ -793,11 +794,11 @@ TtDestroyUserMapping(
         if (Mapping->Process == NULL || Mapping->Process == PsGetCurrentProcess()) {
             MmUnmapLockedPages(Mapping->UserVa, Mapping->Mdl);
         } else {
-            ULONG64 apc[TT_KAPC_STATE_QWORDS];
+            KAPC_STATE apc;
 
-            KeStackAttachProcess(Mapping->Process, apc);
+            KeStackAttachProcess((PRKPROCESS)Mapping->Process, &apc);
             MmUnmapLockedPages(Mapping->UserVa, Mapping->Mdl);
-            KeUnstackDetachProcess(apc);
+            KeUnstackDetachProcess(&apc);
         }
     }
     if (Mapping->Mdl != NULL) {
@@ -940,13 +941,13 @@ TtIoctlUnmap(
             break;
         }
     }
-    WdfWaitLockRelease(fileContext->Lock);
-
-    if (found == NULL) {
-        return STATUS_INVALID_PARAMETER;
+    // Keep FREE_DMA_BUF_EX and FREE_TLB excluded until the view is gone.
+    status = found != NULL ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+    if (found != NULL) {
+        TtDestroyUserMapping(found);
     }
-    TtDestroyUserMapping(found);
-    return STATUS_SUCCESS;
+    WdfWaitLockRelease(fileContext->Lock);
+    return status;
 }
 
 // ---------------------------------------------------------------------------
@@ -997,13 +998,9 @@ TtIoctlPinPages(
     PTT_PINNING pinning = NULL;
     PTT_DMABUF backing = NULL;
     UINT64 backingOffset = 0;
-    PPFN_NUMBER pfns;
-    ULONG pageCount;
-    ULONG i;
     UINT64 nocAddress = 0;
     LONG iatuRegion = -1;
     PLIST_ENTRY entry;
-    BOOLEAN locked = FALSE;
     NTSTATUS status;
     static const UINT32 validFlags =
         TENSTORRENT_PIN_PAGES_CONTIGUOUS | TENSTORRENT_PIN_PAGES_NOC_DMA |
@@ -1047,13 +1044,10 @@ TtIoctlPinPages(
     backing = TtFindDmaBufView(fileContext, in.virtual_address, in.size,
                                &backingOffset);
 
-    // DD-8: otherwise this is the Linux no-IOMMU direct path (memory.c:685-705)
-    // — it returns raw physical addresses as device addresses. In a translated
-    // (non-identity) DMA domain those are not bus addresses; the device would
-    // fault through the IOMMU or silently corrupt whatever the value aliases.
-    // Refuse honestly. The domain was probed at PrepareHardware.
-    if (backing == NULL &&
-        (!Context->DmaIdentityKnown || !Context->DmaIdentityMapped)) {
+    // Only the DMA adapter's logical addresses authorize device access.
+    // Raw PFNs are not DMA mappings, even if another allocation happened
+    // to have numerically identical CPU and device addresses (DD-19).
+    if (backing == NULL) {
         status = STATUS_NOT_SUPPORTED;
         goto unlock;
     }
@@ -1066,43 +1060,12 @@ TtIoctlPinPages(
     }
     pinning->VirtualAddress = in.virtual_address;
     pinning->Size = in.size;
-    pinning->Mdl = NULL;
     pinning->BackingDmaBuf = backing;
     pinning->IatuRegion = -1;
 
     RtlZeroMemory(&out, sizeof(out));
 
-    if (backing != NULL) {
-        out.physical_address = backing->Logical + backingOffset;
-    } else {
-        pinning->Mdl = IoAllocateMdl((PVOID)(ULONG_PTR)in.virtual_address,
-                                     (ULONG)in.size, FALSE, FALSE, NULL);
-        if (pinning->Mdl == NULL) {
-            status = STATUS_INSUFFICIENT_RESOURCES;
-            goto fail;
-        }
-
-        // pin_user_pages(FOLL_WRITE | FOLL_LONGTERM) analogue.
-        __try {
-            MmProbeAndLockPages(pinning->Mdl, UserMode, IoWriteAccess);
-            locked = TRUE;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            status = STATUS_ACCESS_VIOLATION;   // -EFAULT-class failure
-            goto fail;
-        }
-
-        // Direct-path contiguity requirement (memory.c:685-694).
-        pfns = MmGetMdlPfnArray(pinning->Mdl);
-        pageCount = (ULONG)(in.size / PAGE_SIZE);
-        for (i = 1; i < pageCount; i++) {
-            if (pfns[i] != pfns[i - 1] + 1) {
-                status = STATUS_INVALID_PARAMETER;   // -EINVAL
-                goto fail;
-            }
-        }
-
-        out.physical_address = (UINT64)pfns[0] * PAGE_SIZE;
-    }
+    out.physical_address = backing->Logical + backingOffset;
 
     if (in.flags & (TENSTORRENT_PIN_PAGES_NOC_DMA |
                     TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN)) {
@@ -1137,12 +1100,6 @@ TtIoctlPinPages(
 
 fail:
     TtTeardownNocDma(Context, iatuRegion);
-    if (pinning->Mdl != NULL) {
-        if (locked) {
-            MmUnlockPages(pinning->Mdl);
-        }
-        IoFreeMdl(pinning->Mdl);
-    }
     ExFreePoolWithTag(pinning, TT_TAG_PINNING);
 unlock:
     WdfWaitLockRelease(fileContext->Lock);
@@ -1156,10 +1113,6 @@ TtDestroyPinning(
     )
 {
     TtTeardownNocDma(Context, Pinning->IatuRegion);
-    if (Pinning->Mdl != NULL) {
-        MmUnlockPages(Pinning->Mdl);   // dirties write-locked pages (Linux parity)
-        IoFreeMdl(Pinning->Mdl);
-    }
     // A backed pinning holds no pages; the DMA buffer outlives it.
     ExFreePoolWithTag(Pinning, TT_TAG_PINNING);
 }
@@ -1245,13 +1198,13 @@ TtIoctlUnpinPages(
             break;
         }
     }
-    WdfWaitLockRelease(fileContext->Lock);
-
-    if (found == NULL) {
-        return STATUS_INVALID_PARAMETER;   // -EINVAL
+    // A backed pin protects its buffer until the iATU is disabled.
+    status = found != NULL ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+    if (found != NULL) {
+        TtDestroyPinning(Context, found);
     }
-    TtDestroyPinning(Context, found);
-    return STATUS_SUCCESS;
+    WdfWaitLockRelease(fileContext->Lock);
+    return status;
 }
 
 // ---------------------------------------------------------------------------
@@ -1315,4 +1268,53 @@ TtMemoryFileCleanup(
     WdfWaitLockRelease(Context->TlbLock);
 
     TraceLoggingWrite(g_TtTraceProvider, "FileCleanup");
+}
+
+// Reclaim hardware resources from invalidated handles while leaving their
+// host buffers owned until close. Clear every old slot reference before reuse
+// so a stale close cannot disable a new owner's aperture. Caller holds the
+// reset resource exclusively and has already revoked user MMIO views.
+_Use_decl_annotations_
+VOID
+TtMemoryReclaimStale(
+    PTT_DEVICE_CONTEXT Context
+    )
+{
+    PLIST_ENTRY entry;
+    ULONG i;
+
+    WdfWaitLockAcquire(Context->FileListLock, NULL);
+    for (entry = Context->FileList.Flink; entry != &Context->FileList;
+         entry = entry->Flink) {
+        PTT_FILE_CONTEXT fc = CONTAINING_RECORD(entry, TT_FILE_CONTEXT, DeviceLink);
+        PLIST_ENTRY pinEntry;
+
+        if (fc->OpenResetGen == ReadAcquire64(&Context->ResetGen)) {
+            continue;
+        }
+        WdfWaitLockAcquire(fc->Lock, NULL);
+        for (i = 0; i < ARRAYSIZE(fc->DmaBufs); i++) {
+            if (fc->DmaBufs[i] != NULL) {
+                TtTeardownNocDma(Context, fc->DmaBufs[i]->IatuRegion);
+                fc->DmaBufs[i]->IatuRegion = -1;
+            }
+        }
+        for (pinEntry = fc->Pinnings.Flink; pinEntry != &fc->Pinnings;
+             pinEntry = pinEntry->Flink) {
+            PTT_PINNING pin = CONTAINING_RECORD(pinEntry, TT_PINNING, Entry);
+
+            TtTeardownNocDma(Context, pin->IatuRegion);
+            pin->IatuRegion = -1;
+        }
+        WdfWaitLockAcquire(Context->TlbLock, NULL);
+        for (i = 0; i < TT_TLB_TOTAL; i++) {
+            if (Context->TlbOwner[i] == fc->FileObject) {
+                Context->TlbOwner[i] = NULL;
+                Context->TlbUsed[i] = FALSE;
+            }
+        }
+        WdfWaitLockRelease(Context->TlbLock);
+        WdfWaitLockRelease(fc->Lock);
+    }
+    WdfWaitLockRelease(Context->FileListLock);
 }

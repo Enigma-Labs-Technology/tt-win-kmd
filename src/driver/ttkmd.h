@@ -4,20 +4,11 @@
 // Maps to: tt-kmd/module.h + device.h + chardev_private.h (driver-wide declarations)
 #pragma once
 
-#include <ntddk.h>
+#include <ntifs.h>
 #include <wdf.h>
 #include <wdmguid.h>
 
 #include "trace.h"
-
-// KeStackAttachProcess/KeUnstackDetachProcess and KAPC_STATE live in ntifs.h,
-// which conflicts with the ntddk.h WDF already includes. Declare the functions
-// with an opaque APC-state pointer; callers pass a suitably-sized aligned
-// buffer (KAPC_STATE is 48 bytes on x64). Used to unmap a mapping from a
-// foreign process on reset (DD-9).
-NTKERNELAPI VOID KeStackAttachProcess(_Inout_ PEPROCESS Process,
-                                      _Out_ PVOID ApcState);
-NTKERNELAPI VOID KeUnstackDetachProcess(_In_ PVOID ApcState);
 
 // Kernel pool tags, unique per subsystem for leak triage (spec: engineering
 // standards). Tags appear reversed in debugger output: 'vDtT' shows as "TtDv".
@@ -71,9 +62,6 @@ NTKERNELAPI VOID KeUnstackDetachProcess(_In_ PVOID ApcState);
 #define TT_DMA_BUF_DEFAULT_LIMIT_MIB 4096u
 #define TT_DMA_BUF_LIMIT_VALUE_NAME  L"DmaBufferLimitMiB"
 
-// Storage for a KAPC_STATE used by cross-process unmapping (KeStackAttachProcess).
-#define TT_KAPC_STATE_QWORDS 8   // >= sizeof(KAPC_STATE), 8-byte aligned
-
 // Pool tags per subsystem
 #define TT_TAG_MAPPING 'pMtT'
 #define TT_TAG_PINNING 'nPtT'
@@ -106,7 +94,8 @@ typedef struct _TT_DEVICE_CONTEXT {
 
     // fd-gating state, semantics per analysis §04.2 (chardev.c:591-706).
     BOOLEAN Detached;
-    BOOLEAN NeedsHwInit;
+    BOOLEAN HardwareReady;    // D0 admission; guarded by ResetResource
+    BOOLEAN HardwarePrepared; // BARs mapped; guarded by ResetResource
     volatile LONG64 ResetGen;
 
     // reset_rwsem parity (DD-9): RESET_DEVICE exclusive, all else shared.
@@ -119,29 +108,14 @@ typedef struct _TT_DEVICE_CONTEXT {
     WDFWAITLOCK FileListLock;
     LIST_ENTRY FileList;
 
-    // PCI config-space access for reset primitives (marker, timer interrupt),
+    // Read-only PCI configuration discovery,
     // referenced across PrepareHardware..ReleaseHardware.
     BUS_INTERFACE_STANDARD BusInterface;
     BOOLEAN BusInterfaceValid;
 
-    // OQ-5/DD-12: PCI config snapshot for restore after chip-internal resets
-    // (pci_save_state parity, enumerate.c:372 + pcie.c:43-59). Header dwords
-    // indexed by dword number; only the writable subset is restored. SavedMps
-    // is the DBI-view Max Payload Size field (blackhole.c:304-330) — the chip
-    // reset wipes it and the host snapshot cannot recover it.
-    UINT32 SavedHeaderDword[16];
-    USHORT SavedPcieDevCtl;
-    USHORT SavedPcieLnkCtl;
-    ULONG PcieCapOffset;          // 0 = PCIe capability not found
-    UINT8 SavedMps;
-    BOOLEAN SavedMpsValid;
-    BOOLEAN SavedStateValid;
-    BOOLEAN HardwareInitDone;     // probe-time init ran; D0Entry uses this to
-                                  // distinguish resume from initial start
-
     // OQ-4/DD-11: pci.sys device-reset interface for RESET_PCIE_LINK (PLDR).
-    // The reset fires from a work item after the ioctl completes, because
-    // PLDR surprise-removes this very device stack.
+    // The reset runs on an independent work item, because PLDR removes this
+    // device stack. Submission permanently closes this instance's admission.
     DEVICE_RESET_INTERFACE_STANDARD ResetInterface;
     BOOLEAN ResetInterfaceValid;
     // Snapshot captured at enqueue time, holding its own extra
@@ -150,12 +124,7 @@ typedef struct _TT_DEVICE_CONTEXT {
     // cleanup, which is after ReleaseHardware).
     DEVICE_RESET_INTERFACE_STANDARD PldrSnapshot;
     WDFWORKITEM PldrWorkItem;
-    volatile LONG PldrQueued;
-
-    // DD-8: PIN_PAGES hands raw physical addresses to the iATU, valid only in
-    // an identity (untranslated) DMA domain. Probed once at PrepareHardware.
-    BOOLEAN DmaIdentityKnown;
-    BOOLEAN DmaIdentityMapped;
+    volatile LONG PldrQueued; // one-way recovery latch; also gates D0Entry
 
     // BAR inventory indexed by PCI BAR number (pci_resource_len parity).
     ULONGLONG BarLength[TT_MAX_BARS];
@@ -173,6 +142,7 @@ typedef struct _TT_DEVICE_CONTEXT {
     // and ARC message transaction lock (documented superset of Linux).
     WDFWAITLOCK KernelTlbLock;
     WDFWAITLOCK ArcMsgLock;
+    BOOLEAN ArcExchangeUncertain; // requires platform recovery after an uncertain exchange
 
     // Telemetry tag cache (tt-kmd device.h telemetry_tag_cache parity):
     // per-tag absolute CSM value address, 0 = tag absent.
@@ -243,7 +213,7 @@ typedef struct _TT_USER_MAPPING {
 
 struct tenstorrent_noc_tlb_config;
 
-// One pinned user range from PIN_PAGES (tt-kmd struct pinned_page_range).
+// One common-buffer registration from PIN_PAGES (tt-kmd pinned_page_range ABI).
 // DD-16: a range inside a MAP view of one of the handle's own DMA buffers is
 // "backed": no pages are probed or locked and the device address comes from
 // the common buffer, so it works in translated DMA domains and leaves nothing
@@ -252,7 +222,6 @@ typedef struct _TT_PINNING {
     LIST_ENTRY Entry;
     UINT64 VirtualAddress;   // original pin VA (match key for UNPIN)
     UINT64 Size;
-    PMDL Mdl;                // probe-and-locked; NULL when BackingDmaBuf != NULL
     PTT_DMABUF BackingDmaBuf;
     LONG IatuRegion;         // -1 = none
 } TT_PINNING, *PTT_PINNING;
@@ -310,7 +279,7 @@ EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL TtEvtIoDeviceControl;
 // Shared gate check (chardev.c:591-624 parity); used by both the queue path
 // and the in-caller-context path.
 NTSTATUS TtCheckIoGates(_In_ PTT_DEVICE_CONTEXT Context,
-                        _In_opt_ WDFFILEOBJECT FileObject, _In_ UINT32 Nr);
+                        _In_opt_ WDFFILEOBJECT FileObject);
 
 // memory.c (maps to tt-kmd memory.c + tlb.c)
 NTSTATUS TtIoctlAllocateDmaBuf(_In_ PTT_DEVICE_CONTEXT Context,
@@ -360,7 +329,6 @@ NTSTATUS TtBhConfigureUserTlb(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Id,
                               _In_ const struct tenstorrent_noc_tlb_config *Config);
 NTSTATUS TtBhConfigureOutboundAtu(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Region,
                                   _In_ UINT64 Base, _In_ UINT64 Limit, _In_ UINT64 Target);
-BOOLEAN TtBhReset(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 Flags);
 BOOLEAN TtBhInitHardware(_In_ PTT_DEVICE_CONTEXT Context);
 VOID TtBhNocWrite(_In_ PTT_DEVICE_CONTEXT Context, _In_ UINT32 X, _In_ UINT32 Y,
                   _In_ UINT64 Addr, _In_ UINT32 Data, _In_ UINT32 Noc);
@@ -371,12 +339,9 @@ NTSTATUS TtIoctlSetNocCleanup(_In_ PTT_DEVICE_CONTEXT Context,
 NTSTATUS TtIoctlResetDevice(_In_ PTT_DEVICE_CONTEXT Context,
                             _In_ WDFFILEOBJECT FileObject, _In_ WDFREQUEST Request);
 VOID TtResetZapMappings(_In_ PTT_DEVICE_CONTEXT Context);
-VOID TtPciSaveState(_In_ PTT_DEVICE_CONTEXT Context);
-VOID TtDiscoverPcieCap(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtMemoryReclaimStale(_In_ PTT_DEVICE_CONTEXT Context);
+VOID TtInvalidateFiles(_In_ PTT_DEVICE_CONTEXT Context, _In_opt_ WDFFILEOBJECT Survivor);
 EVT_WDF_WORKITEM TtPldrWorkItem;
-BOOLEAN TtCfgReadWord(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _Out_ USHORT *Value);
-VOID TtCfgWriteWord(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _In_ USHORT Value);
-VOID TtCfgWriteDword(_In_ PTT_DEVICE_CONTEXT Context, _In_ ULONG Offset, _In_ ULONG Value);
 
 // Reset resource helpers (DD-9). KeEnterCriticalRegion is taken inside.
 VOID TtResetAcquireShared(_In_ PTT_DEVICE_CONTEXT Context);

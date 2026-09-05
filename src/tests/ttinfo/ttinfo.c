@@ -675,8 +675,7 @@ static void TestM3DmaQuota(HANDLE h, int deviceId)
     }
 }
 
-// M3 (pin): PIN_PAGES positive + negatives. Factored from the original
-// TestM3Memory (byte-equivalent) so `--only pin` runs just this rung.
+// M3 (pin): common-buffer registration and unsupported user-page negatives.
 static void TestM3Pin(HANDLE h, int deviceId)
 {
     struct tenstorrent_pin_pages pp;
@@ -689,9 +688,12 @@ static void TestM3Pin(HANDLE h, int deviceId)
         return;   // needs the Blackhole TLB/DMA hardware model
     }
 
-    // --- PIN_PAGES: single page positive + negatives ----------------------
+    // --- PIN_PAGES: arbitrary user pages must be refused ------------------
     pinBuf = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     CHECK(pinBuf != NULL, "VirtualAlloc failed\n");
+    if (pinBuf == NULL) {
+        return;
+    }
     memset(pinBuf, 0xAB, 4096);
 
     memset(&pp, 0, sizeof(pp));
@@ -699,25 +701,8 @@ static void TestM3Pin(HANDLE h, int deviceId)
     pp.in.virtual_address = (uint64_t)(uintptr_t)pinBuf;
     pp.in.size = 4096;
     ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &pp, sizeof(pp), sizeof(pp), &info);
-    CHECK(ok, "pin failed, gle=%lu\n", GetLastError());
-    CHECK(pp.out.physical_address != 0, "pin phys=0\n");
-    printf("pin: 4K page at phys=%llx\n",
-           (unsigned long long)pp.out.physical_address);
-
-    ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &pp, sizeof(pp), sizeof(pp), &info);
-    CHECK(!ok && GetLastError() == ERROR_ALREADY_EXISTS,
-          "dup pin: ok=%d gle=%lu\n", ok, GetLastError());
-
-    memset(&up, 0, sizeof(up));
-    up.in.virtual_address = (uint64_t)(uintptr_t)pinBuf;
-    up.in.size = 8192;   // wrong size
-    ok = TtIoctl(h, IOCTL_TENSTORRENT_UNPIN_PAGES, &up, sizeof(up), sizeof(up), &info);
-    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
-          "unpin wrong size: ok=%d gle=%lu\n", ok, GetLastError());
-
-    up.in.size = 4096;
-    ok = TtIoctl(h, IOCTL_TENSTORRENT_UNPIN_PAGES, &up, sizeof(up), sizeof(up), &info);
-    CHECK(ok, "unpin failed, gle=%lu\n", GetLastError());
+    CHECK(!ok && GetLastError() == ERROR_NOT_SUPPORTED,
+          "raw user-page DMA must be refused: ok=%d gle=%lu\n", ok, GetLastError());
 
     memset(&pp, 0, sizeof(pp));
     pp.in.output_size_bytes = sizeof(struct tenstorrent_pin_pages_out);
@@ -776,6 +761,17 @@ static void TestM3Pin(HANDLE h, int deviceId)
         CHECK(ppx.out.noc_address >= (4ull << 58),
               "backed pin: noc=%llx\n", (unsigned long long)ppx.out.noc_address);
 
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &ppx, sizeof(ppx), sizeof(ppx), &info);
+        CHECK(!ok && GetLastError() == ERROR_ALREADY_EXISTS,
+              "backed pin: duplicate ok=%d gle=%lu\n", ok, GetLastError());
+
+        memset(&up, 0, sizeof(up));
+        up.in.virtual_address = mp.out.user_va;
+        up.in.size = 4096; // exact range required; must not destroy the full-view pin
+        ok = TtIoctl(h, IOCTL_TENSTORRENT_UNPIN_PAGES, &up, sizeof(up), sizeof(up), &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "backed pin: wrong-size unpin ok=%d gle=%lu\n", ok, GetLastError());
+
         // The buffer cannot be freed while the pin references it.
         memset(&fr, 0, sizeof(fr));
         fr.in.buf_index = 4;
@@ -804,16 +800,14 @@ static void TestM3Pin(HANDLE h, int deviceId)
         ok = TtIoctl(h, IOCTL_TENSTORRENT_UNPIN_PAGES, &up, sizeof(up), sizeof(up), &info);
         CHECK(ok, "backed pin: sub-range unpin gle=%lu\n", GetLastError());
 
-        // A range running past the view is not backed and falls through to
-        // the direct path, which rejects the driver mapping as non-user RAM
-        // or refuses in a translated domain; either way it must not succeed
-        // as a backed pin.
+        // A range running past the view is not backed and must be refused.
         memset(&ppx, 0, sizeof(ppx));
         ppx.in.output_size_bytes = sizeof(ppx.out);
         ppx.in.virtual_address = mp.out.user_va + (1u << 20) - 4096;
         ppx.in.size = 8192;
         ok = TtIoctl(h, IOCTL_TENSTORRENT_PIN_PAGES, &ppx, sizeof(ppx), sizeof(ppx), &info);
-        CHECK(!ok, "backed pin: overrun pin unexpectedly ok\n");
+        CHECK(!ok && GetLastError() == ERROR_NOT_SUPPORTED,
+              "backed pin: overrun ok=%d gle=%lu\n", ok, GetLastError());
 
         memset(&um, 0, sizeof(um));
         um.in.user_va = mp.out.user_va;
@@ -1277,206 +1271,68 @@ static void TestTelemetryDump(HANDLE h, int deviceId)
     CHECK(HeartbeatAdvances(h, 1500), "telemetry: heartbeat did not advance\n");
 }
 
-// M4: reset flavors, fd-invalidation, reset-under-mapping. Needs a second
-// handle (the "worker") plus a fresh handle per reset (tt-umd/tools pattern).
+// Refused reset modes must leave existing handles usable.
+// Actual PnP/power invalidation is a separate VM/Verifier campaign (DD-20).
 static void TestM4Reset(const WCHAR *path, int deviceId)
 {
     HANDLE worker, resetter;
-    struct tenstorrent_reset_device rd;
     struct tenstorrent_get_device_info di;
-    struct tenstorrent_allocate_tlb at;
-    struct tenstorrent_configure_tlb ct;
-    struct tenstorrent_map mp;
-    volatile uint32_t *va;
     DWORD info;
-    BOOL ok;
+    uint32_t flag;
 
     if (deviceId != 0xB140) {
         return;
     }
-
-    // Worker handle maps a TLB window (the "active mapping").
     worker = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                         OPEN_EXISTING, 0, NULL);
-    CHECK(worker != INVALID_HANDLE_VALUE, "worker open gle=%lu\n", GetLastError());
-
-    memset(&at, 0, sizeof(at));
-    at.in.size = 2 << 20;
-    ok = TtIoctl(worker, IOCTL_TENSTORRENT_ALLOCATE_TLB, &at, sizeof(at), sizeof(at), &info);
-    CHECK(ok, "m4 tlb alloc gle=%lu\n", GetLastError());
-    memset(&ct, 0, sizeof(ct));
-    ct.in.id = at.out.id;
-    ct.in.config.addr = 0x10000000ull;
-    ct.in.config.x_end = 8;
-    ct.in.config.ordering = 1;
-    ok = TtIoctl(worker, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info);
-    CHECK(ok, "m4 tlb cfg gle=%lu\n", GetLastError());
-    memset(&mp, 0, sizeof(mp));
-    mp.in.mmap_offset = at.out.mmap_offset_uc;
-    mp.in.length = 2 << 20;
-    ok = TtIoctl(worker, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
-    CHECK(ok, "m4 map gle=%lu\n", GetLastError());
-    va = (volatile uint32_t *)(uintptr_t)mp.out.user_va;
-    if (g_simOracle) {
-        CHECK(va[0x100 / 4] == 1, "m4 pre-reset CSM read=%u\n", va[0x100 / 4]);
-    } else {
-        CHECK(HeartbeatAdvances(worker, 1500),
-              "m4 pre-reset heartbeat health check failed\n");
-    }
-
-    // Invalid reset flag -> INVALID_PARAMETER.
-    memset(&rd, 0, sizeof(rd));
-    rd.in.output_size_bytes = sizeof(rd.out);
-    rd.in.flags = 99;
-    ok = TtIoctl(worker, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
-    CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
-          "m4 bad flag: ok=%d gle=%lu\n", ok, GetLastError());
-
-    // Destructive reset from a FRESH handle (mappings live on the worker) —
-    // this is the tt-umd/tools/reset.c pattern.
+                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     resetter = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                           OPEN_EXISTING, 0, NULL);
-    CHECK(resetter != INVALID_HANDLE_VALUE, "resetter open gle=%lu\n", GetLastError());
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(worker != INVALID_HANDLE_VALUE && resetter != INVALID_HANDLE_VALUE,
+          "reset refusal: open gle=%lu\n", GetLastError());
+    if (worker != INVALID_HANDLE_VALUE && resetter != INVALID_HANDLE_VALUE) {
+        struct tenstorrent_reset_device invalid;
+        BOOL ok;
 
-    memset(&rd, 0, sizeof(rd));
-    rd.in.output_size_bytes = sizeof(rd.out);
-    rd.in.flags = TENSTORRENT_RESET_DEVICE_ASIC_RESET;   // 4
-    ok = TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
-    CHECK(ok, "m4 ASIC_RESET ioctl gle=%lu\n", GetLastError());
-    CHECK(rd.out.result == 0, "m4 ASIC_RESET result=%u\n", rd.out.result);
-    printf("reset: ASIC_RESET result=%u (success)\n", rd.out.result);
+        memset(&invalid, 0, sizeof(invalid));
+        invalid.in.flags = 99;
+        invalid.in.output_size_bytes = sizeof(invalid.out);
+        ok = TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &invalid,
+                     sizeof(invalid), sizeof(invalid), &info);
+        CHECK(!ok && GetLastError() == ERROR_INVALID_PARAMETER,
+              "reset refusal: invalid flag ok=%d gle=%lu\n", ok, GetLastError());
+        for (flag = 0; flag <= TENSTORRENT_RESET_DEVICE_POST_RESET; flag++) {
+            struct tenstorrent_reset_device rd;
 
-    // The worker handle was opened before the gen bump -> now permanently
-    // invalid: every ioctl returns STATUS_DEVICE_REMOVED (ERROR_NO_SUCH_DEVICE).
-    memset(&di, 0, sizeof(di));
-    di.in.output_size_bytes = sizeof(di.out);
-    ok = TtIoctl(worker, IOCTL_TENSTORRENT_GET_DEVICE_INFO, &di, sizeof(di), sizeof(di), &info);
-    CHECK(!ok && (GetLastError() == ERROR_NO_SUCH_DEVICE ||
-                  GetLastError() == ERROR_DEVICE_REMOVED),
-          "m4 stale worker not invalidated: ok=%d gle=%lu\n", ok, GetLastError());
-    printf("reset: stale worker handle -> gle=%lu (device removed)\n", GetLastError());
-
-    // The worker's mapping was zapped; touching it now faults. Verify via SEH.
-    {
-        BOOL faulted = FALSE;
-        __try {
-            va[0] = 0xFFFFFFFF;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            faulted = TRUE;
+            if (flag == TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK) {
+                continue; // explicit platform reset is outside this nondestructive test
+            }
+            memset(&rd, 0, sizeof(rd));
+            rd.in.flags = flag;
+            rd.in.output_size_bytes = sizeof(rd.out);
+            ok = TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
+            CHECK(!ok && GetLastError() == ERROR_NOT_SUPPORTED,
+                  "reset refusal: flag=%u ok=%d gle=%lu\n", flag, ok, GetLastError());
+            memset(&di, 0, sizeof(di));
+            di.in.output_size_bytes = sizeof(di.out);
+            CHECK(TtIoctl(worker, IOCTL_TENSTORRENT_GET_DEVICE_INFO, &di, sizeof(di), sizeof(di), &info),
+                  "refused reset invalidated worker, gle=%lu\n", GetLastError());
         }
-        CHECK(faulted, "m4 zapped mapping still accessible\n");
-        printf("reset: stale mapping access faulted (zapped)\n");
     }
-
-    // The resetter (carried forward) is still valid and in the reset window:
-    // GET_DEVICE_INFO allowed; a non-allowlisted ioctl (QUERY_MAPPINGS) -> removed.
-    memset(&di, 0, sizeof(di));
-    di.in.output_size_bytes = sizeof(di.out);
-    ok = TtIoctl(resetter, IOCTL_TENSTORRENT_GET_DEVICE_INFO, &di, sizeof(di), sizeof(di), &info);
-    CHECK(ok, "m4 resetter GET_DEVICE_INFO in window gle=%lu\n", GetLastError());
-    {
-        struct tenstorrent_query_mappings_in qm;
-        memset(&qm, 0, sizeof(qm));
-        ok = TtIoctl(resetter, IOCTL_TENSTORRENT_QUERY_MAPPINGS, &qm, sizeof(qm), sizeof(qm), &info);
-        CHECK(!ok, "m4 non-allowlisted ioctl allowed in reset window\n");
-    }
-
-    // POST_RESET completes the sequence (marker cleared by the glue).
-    memset(&rd, 0, sizeof(rd));
-    rd.in.output_size_bytes = sizeof(rd.out);
-    rd.in.flags = TENSTORRENT_RESET_DEVICE_POST_RESET;   // 6
-    ok = TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
-    CHECK(ok, "m4 POST_RESET ioctl gle=%lu\n", GetLastError());
-    CHECK(rd.out.result == 0, "m4 POST_RESET result=%u (marker not cleared?)\n", rd.out.result);
-    printf("reset: POST_RESET result=%u (window closed)\n", rd.out.result);
-
-    // After POST_RESET the resetter is fully usable again.
-    {
-        struct tenstorrent_query_mappings_in qm;
-        memset(&qm, 0, sizeof(qm));
-        ok = TtIoctl(resetter, IOCTL_TENSTORRENT_QUERY_MAPPINGS, &qm, sizeof(qm), sizeof(qm), &info);
-        CHECK(ok, "m4 post-window QUERY_MAPPINGS gle=%lu\n", GetLastError());
-    }
-
-    CloseHandle(worker);
-    CloseHandle(resetter);
-    printf("reset: lifecycle sequence PASS\n");
+    if (worker != INVALID_HANDLE_VALUE) CloseHandle(worker);
+    if (resetter != INVALID_HANDLE_VALUE) CloseHandle(resetter);
 }
 
-// M4 reset storm: hammer resets from fresh handles while a worker holds live
-// mappings and issues ioctls. Verifies no crash and correct invalidation.
+// Keep the CLI switch, but identify the changed contract accurately.
 static int RunResetStorm(const WCHAR *path, int iterations)
 {
     int i;
+    int before = g_failures;
 
-    for (i = 0; i < iterations; i++) {
-        HANDLE worker, resetter;
-        struct tenstorrent_reset_device rd;
-        struct tenstorrent_allocate_tlb at;
-        struct tenstorrent_configure_tlb ct;
-        struct tenstorrent_map mp;
-        DWORD info;
-
-        worker = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                             OPEN_EXISTING, 0, NULL);
-        if (worker == INVALID_HANDLE_VALUE) {
-            printf("storm %d: worker open gle=%lu\n", i, GetLastError());
-            return 1;
-        }
-        memset(&at, 0, sizeof(at));
-        at.in.size = 2 << 20;
-        if (TtIoctl(worker, IOCTL_TENSTORRENT_ALLOCATE_TLB, &at, sizeof(at), sizeof(at), &info)) {
-            memset(&ct, 0, sizeof(ct));
-            ct.in.id = at.out.id;
-            ct.in.config.addr = 0x10000000ull;
-            ct.in.config.x_end = 8;
-            ct.in.config.ordering = 1;
-            TtIoctl(worker, IOCTL_TENSTORRENT_CONFIGURE_TLB, &ct, sizeof(ct), sizeof(ct), &info);
-            memset(&mp, 0, sizeof(mp));
-            mp.in.mmap_offset = at.out.mmap_offset_uc;
-            mp.in.length = 2 << 20;
-            TtIoctl(worker, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info);
-        }
-
-        resetter = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                               OPEN_EXISTING, 0, NULL);
-        if (resetter == INVALID_HANDLE_VALUE) {
-            printf("storm %d: resetter open gle=%lu\n", i, GetLastError());
-            return 1;
-        }
-        memset(&rd, 0, sizeof(rd));
-        rd.in.output_size_bytes = sizeof(rd.out);
-        rd.in.flags = (i & 1) ? TENSTORRENT_RESET_DEVICE_ASIC_RESET
-                              : TENSTORRENT_RESET_DEVICE_CONFIG_WRITE;
-        if (!TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info)) {
-            printf("storm %d: reset gle=%lu\n", i, GetLastError());
-            return 1;
-        }
-        // Worker is now stale; a stray ioctl must be safely rejected, not crash.
-        {
-            struct tenstorrent_get_device_info di;
-            memset(&di, 0, sizeof(di));
-            di.in.output_size_bytes = sizeof(di.out);
-            TtIoctl(worker, IOCTL_TENSTORRENT_GET_DEVICE_INFO, &di, sizeof(di), sizeof(di), &info);
-        }
-        // Complete so the device is usable next iteration.
-        memset(&rd, 0, sizeof(rd));
-        rd.in.output_size_bytes = sizeof(rd.out);
-        rd.in.flags = TENSTORRENT_RESET_DEVICE_POST_RESET;
-        TtIoctl(resetter, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
-
-        CloseHandle(worker);
-        CloseHandle(resetter);
-        if ((i + 1) % 200 == 0) {
-            printf("storm: %d resets\n", i + 1);
-        }
+    for (i = 0; i < iterations && g_failures == before; i++) {
+        TestM4Reset(path, 0xB140);
     }
-    printf("storm: %d resets PASS\n", iterations);
-    return 0;
+    printf("reset refusal: %d iterations; no physical resets issued\n", i);
+    return g_failures != before;
 }
 
 // 10,000-cycle open/alloc/map/pin/close soak (M3 acceptance: no leaks).
@@ -1545,7 +1401,14 @@ static int RunSoak(const WCHAR *path, int cycles)
             printf("soak %d: dmabuf gle=%lu\n", i, GetLastError());
             return 1;
         }
-        pinBuf = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        memset(&mp, 0, sizeof(mp));
+        mp.in.mmap_offset = ab.out.mapping_offset;
+        mp.in.length = 64 * 1024;
+        if (!TtIoctl(h, IOCTL_TENSTORRENT_MAP, &mp, sizeof(mp), sizeof(mp), &info)) {
+            CloseHandle(h);
+            return 1;
+        }
+        pinBuf = (void *)(uintptr_t)mp.out.user_va;
         memset(pinBuf, 1, 4096);
         memset(&pp, 0, sizeof(pp));
         pp.in.output_size_bytes = sizeof(struct tenstorrent_pin_pages_out);
@@ -1557,7 +1420,6 @@ static int RunSoak(const WCHAR *path, int cycles)
         }
 
         CloseHandle(h);   // cleanup-on-close tears down everything
-        VirtualFree(pinBuf, 0, MEM_RELEASE);
 
         if ((i + 1) % 1000 == 0) {
             printf("soak: %d cycles\n", i + 1);
@@ -1626,8 +1488,8 @@ static void ProbeDevice(HANDLE h, int *isRealDevice, int *deviceId)
     }
 }
 
-// Issue one RESET_DEVICE flavor on `h`; assert the ioctl succeeded and
-// out.result==0, and print out.result. Returns the ioctl success.
+// Issue one RESET_DEVICE flavor. Report pending submission separately from
+// completed success; a refused or malformed response fails the test.
 static BOOL IssueReset(HANDLE h, uint32_t flavor, const char *name)
 {
     struct tenstorrent_reset_device rd;
@@ -1637,28 +1499,32 @@ static BOOL IssueReset(HANDLE h, uint32_t flavor, const char *name)
     memset(&rd, 0, sizeof(rd));
     rd.in.output_size_bytes = sizeof(rd.out);
     rd.in.flags = flavor;
+    rd.out.result = UINT32_MAX;
     ok = TtIoctl(h, IOCTL_TENSTORRENT_RESET_DEVICE, &rd, sizeof(rd), sizeof(rd), &info);
     CHECK(ok, "reset(%s) ioctl gle=%lu\n", name, GetLastError());
-    CHECK(ok && rd.out.result == 0, "reset(%s) out.result=%u\n", name, rd.out.result);
-    printf("reset: %s out.result=%u\n", name, ok ? rd.out.result : (uint32_t)-1);
-    return ok;
+    if (!ok) {
+        return FALSE;
+    }
+    CHECK(info >= sizeof(rd) && rd.out.output_size_bytes >= sizeof(rd.out),
+          "reset(%s) truncated reply\n", name);
+    if (info < sizeof(rd) || rd.out.output_size_bytes < sizeof(rd.out)) {
+        return FALSE;
+    }
+    if (rd.out.result == TT_RESET_RESULT_PENDING) {
+        printf("reset: %s submitted; completion requires PnP departure and a new instance\n", name);
+        return TRUE;
+    }
+    CHECK(rd.out.result == 0, "reset(%s) out.result=%u\n", name, rd.out.result);
+    printf("reset: %s out.result=%u\n", name, rd.out.result);
+    return rd.out.result == 0;
 }
 
 // DESTRUCTIVE: open a fresh handle, issue the requested RESET_DEVICE flavor,
-// print out.result, then run the heartbeat health check (#2/#5) on that handle.
-// `restore-then-post` issues RESTORE_STATE then POST_RESET.
+// and print the submission result. A pending PLDR leaves this handle stale;
+// health checks require a separately verified new PnP instance (DD-20).
 static void DoResetFlavor(const WCHAR *path, const WCHAR *flavor)
 {
     HANDLE h;
-    BOOL alive;
-    // Only flavors that leave the chip live and OUT of the reset window can
-    // be health-asserted: user/asic/asic-dmc set needs_hw_init (telemetry is
-    // gated NOT_READY until --reset post), config-write leaves the chip mid-
-    // reset, and pcie-link tears down the device stack entirely. For those
-    // the heartbeat result is informational, not a failure.
-    BOOL expectLive = (wcscmp(flavor, L"restore") == 0 ||
-                       wcscmp(flavor, L"post") == 0 ||
-                       wcscmp(flavor, L"restore-then-post") == 0);
 
     h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
@@ -1692,20 +1558,6 @@ static void DoResetFlavor(const WCHAR *path, const WCHAR *flavor)
         return;
     }
 
-    // Health check after the reset flavor, on the same fresh handle. Only
-    // asserted for flavors that leave the device readable (see expectLive).
-    alive = HeartbeatAdvances(h, 1500);
-    if (expectLive) {
-        CHECK(alive, "reset(%ls) post-reset heartbeat did not advance\n", flavor);
-        printf("reset: post-reset health %s\n",
-               alive ? "PASS (heartbeat advancing)" : "FAIL (heartbeat stalled)");
-    } else {
-        printf("reset: post-reset heartbeat %s (informational — this flavor "
-               "opens a reset window or tears down the stack; follow with "
-               "--reset post, or re-enumerate for pcie-link)\n",
-               alive ? "advancing" : "not readable");
-    }
-
     CloseHandle(h);
 }
 
@@ -1720,18 +1572,18 @@ static void Usage(const WCHAR *argv0)
         "                      info mappings negative firmware telemetry\n"
         "                      tlb dma pin\n"
         "  --reset <flavor>  DESTRUCTIVE: issue one RESET_DEVICE flavor on a\n"
-        "                    fresh handle, print out.result, then a heartbeat\n"
-        "                    health check. Flavors:\n"
+        "                    fresh handle. Only pcie-link can submit a reset;\n"
+        "                    completion needs a new PnP instance. Flavors:\n"
         "                      restore pcie-link config-write user asic\n"
         "                      asic-dmc post restore-then-post\n"
-        "  --all-legacy      reproduce the full legacy ttsim sweep, including\n"
-        "                    the DESTRUCTIVE M4 reset (implies --sim-oracle).\n"
+        "  --all-legacy      run the ttsim sweep, including reset-refusal\n"
+        "                    checks (implies --sim-oracle).\n"
         "  --sim-oracle      keep ttsim exact-equality checks (board id, AICLK,\n"
         "                    CSM liveness). Default off = silicon mode.\n"
         "  --soak N          open/alloc/map/pin/close soak, N cycles.\n"
         "  --multiproc P     run P concurrent --soak children (default 200\n"
         "                    cycles each, or --soak N).\n"
-        "  --storm N         DESTRUCTIVE reset storm, N iterations.\n"
+        "  --storm N         repeat reset-refusal checks; no physical resets.\n"
         "  --help            this text.\n");
 }
 

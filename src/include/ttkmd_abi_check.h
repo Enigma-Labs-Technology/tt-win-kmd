@@ -21,6 +21,8 @@
     static_assert(offsetof(struct t, f) == (off) && sizeof(((struct t *)0)->f) == (sz), \
                   #t "." #f " layout != Linux ABI")
 
+static_assert(TT_RESET_RESULT_PENDING == 2u, "Windows PLDR submission result changed");
+
 // GET_DEVICE_INFO (nr 0)
 TT_ABI_SIZE(tenstorrent_get_device_info_in, 4);
 TT_ABI_FIELD(tenstorrent_get_device_info_in, output_size_bytes, 0, 4);

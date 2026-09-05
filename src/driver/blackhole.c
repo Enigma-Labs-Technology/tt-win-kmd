@@ -160,6 +160,13 @@ TtBhConfigureOutboundAtu(
     }
 
     regs = Context->Bar2Mapping + 0x1000 + (Region * 0x100);
+    // Disable and flush before changing a live aperture's address words.
+    // Teardown must not transiently retarget an enabled DMA window to zero.
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x04), 0);
+    (VOID)READ_REGISTER_ULONG((volatile ULONG *)(regs + 0x04));
+    if (Limit == 0) {
+        return STATUS_SUCCESS;
+    }
     WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x08), (UINT32)Base);
     WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x0C), (UINT32)(Base >> 32));
     WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x14), (UINT32)Target);
@@ -167,8 +174,9 @@ TtBhConfigureOutboundAtu(
     WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x10), (UINT32)Limit);
     WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x20), (UINT32)(Limit >> 32));
     WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x00), ctrl1);
-    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x04), ctrl2);
     WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x1C), 0);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(regs + 0x04), ctrl2);
+    (VOID)READ_REGISTER_ULONG((volatile ULONG *)(regs + 0x04));
 
     TraceLoggingWrite(g_TtTraceProvider, "IatuConfigured",
                       TraceLoggingUInt32(Region, "region"),
@@ -233,86 +241,13 @@ TtBhNocWrite(
     TtBhNocWrite32(Context, X, Y, Addr, Data, Noc);
 }
 
-// PCIe DBI backdoor + Device Control fields (tt-kmd/blackhole.c:44-51,
-// pcie_regs): the chip's own config space viewed through the FW-configured
-// outbound NOC TLB 62 at a fixed NOC address. The host config snapshot cannot
-// recover the DBI-view MPS after a chip reset, hence this side channel.
-#define TT_BH_NOC_ID_OFFSET 0x4044u
-#define TT_BH_PCIE_DBI_ADDR 0xF800000000000000ull
-#define TT_BH_DBI_DEVCTL_DEVSTA 0x78u
-#define TT_PCI_EXP_DEVCTL_PAYLOAD 0x00E0u   // MPS field, bits 7:5
-#define TT_PCI_EXP_DEVCTL_PAYLOAD_SHIFT 5
-#define TT_PCI_EXP_DEVCTL_READRQ 0x7000u    // MRRS field, bits 14:12
-#define TT_PCI_EXP_DEVCTL_READRQ_SHIFT 12
-#define TT_BH_MAX_MRRS_ENCODING 5u          // 4096 bytes (MAX_MRRS, blackhole.c:18)
-#define TT_AUTO_RESET_TIMEOUT_S 10u         // auto_reset_timeout default (module.c:48)
-
-// blackhole_detect_pcie_noc_x (blackhole.c:298-302): BH has two PCIE
-// instances; the NOC ID register in NOC2AXI config space names the live one.
+// Subtraction-based validation avoids overflow before a firmware MMIO read.
 static BOOLEAN
-TtBhDetectPcieNocX(
-    _In_ struct _TT_DEVICE_CONTEXT *Context,
-    _Out_ UINT32 *NocX
-    )
+TtBhCsmRangeValid(UINT64 Address, UINT64 Length)
 {
-    *NocX = READ_REGISTER_ULONG(
-                (volatile ULONG *)(Context->Noc2AxiCfg + TT_BH_NOC_ID_OFFSET)) & 0x3F;
-    return (*NocX == 2 || *NocX == 11);
-}
-
-// blackhole_save_reset_state (blackhole.c:304-315): snapshot the DBI-view
-// Max Payload Size. Resolves OQ-5 item 2 with reset.c's TtPciSaveState.
-_Use_decl_annotations_
-VOID
-TtBhSaveResetState(
-    struct _TT_DEVICE_CONTEXT *Context
-    )
-{
-    UINT32 x, deviceControl;
-
-    Context->SavedMpsValid = FALSE;
-    if (Context->Noc2AxiCfg == NULL || !TtBhDetectPcieNocX(Context, &x)) {
-        return;
-    }
-    deviceControl = TtBhNocRead32(Context, x, 0,
-                                  TT_BH_PCIE_DBI_ADDR + TT_BH_DBI_DEVCTL_DEVSTA, 0);
-    if (deviceControl == MAXUINT32) {
-        return;   // NOC hung / window dead — keep the snapshot invalid
-    }
-    Context->SavedMps = (UINT8)((deviceControl & TT_PCI_EXP_DEVCTL_PAYLOAD) >>
-                                TT_PCI_EXP_DEVCTL_PAYLOAD_SHIFT);
-    Context->SavedMpsValid = TRUE;
-    TraceLoggingWrite(g_TtTraceProvider, "BhSavedMps",
-                      TraceLoggingUInt8(Context->SavedMps, "mps"));
-}
-
-// blackhole_restore_reset_state (blackhole.c:317-330): RMW the DBI-view MPS
-// back to the negotiated value. A chip reset leaves a power-on default that
-// can exceed the link-negotiated MPS — oversized TLPs on the first large DMA.
-_Use_decl_annotations_
-VOID
-TtBhRestoreResetState(
-    struct _TT_DEVICE_CONTEXT *Context
-    )
-{
-    UINT32 x, deviceControl;
-
-    if (!Context->SavedMpsValid || Context->Noc2AxiCfg == NULL ||
-        !TtBhDetectPcieNocX(Context, &x)) {
-        return;
-    }
-    deviceControl = TtBhNocRead32(Context, x, 0,
-                                  TT_BH_PCIE_DBI_ADDR + TT_BH_DBI_DEVCTL_DEVSTA, 0);
-    if (deviceControl == MAXUINT32) {
-        return;
-    }
-    deviceControl &= ~TT_PCI_EXP_DEVCTL_PAYLOAD;
-    deviceControl |= ((UINT32)Context->SavedMps << TT_PCI_EXP_DEVCTL_PAYLOAD_SHIFT) &
-                     TT_PCI_EXP_DEVCTL_PAYLOAD;
-    TtBhNocWrite32(Context, x, 0,
-                   TT_BH_PCIE_DBI_ADDR + TT_BH_DBI_DEVCTL_DEVSTA, deviceControl, 0);
-    TraceLoggingWrite(g_TtTraceProvider, "BhRestoredMps",
-                      TraceLoggingUInt8(Context->SavedMps, "mps"));
+    return (Address & 3u) == 0 && Address >= TT_ARC_CSM_BASE &&
+        Length <= TT_ARC_CSM_SIZE &&
+        Address - TT_ARC_CSM_BASE <= TT_ARC_CSM_SIZE - Length;
 }
 
 // Maps to is_range_within_csm (telemetry.h:75-78) + csm_read32/csm_write32
@@ -324,8 +259,7 @@ TtBhCsmRead32(
     _Out_ UINT32 *Value
     )
 {
-    if (Addr < TT_ARC_CSM_BASE ||
-        Addr > (UINT64)TT_ARC_CSM_BASE + TT_ARC_CSM_SIZE - sizeof(UINT32)) {
+    if (!TtBhCsmRangeValid(Addr, sizeof(UINT32))) {
         *Value = 0;
         return FALSE;
     }
@@ -340,8 +274,7 @@ TtBhCsmWrite32(
     _In_ UINT32 Value
     )
 {
-    if (Addr < TT_ARC_CSM_BASE ||
-        Addr > (UINT64)TT_ARC_CSM_BASE + TT_ARC_CSM_SIZE - sizeof(UINT32)) {
+    if (!TtBhCsmRangeValid(Addr, sizeof(UINT32))) {
         return FALSE;
     }
     TtBhNocWrite32(Context, TT_BH_ARC_X, TT_BH_ARC_Y, Addr, Value, 0);
@@ -388,7 +321,7 @@ TtBhArcMsgPush(
     if (!TtBhCsmRead32(Context, QueueBase + TT_ARC_MSG_QUEUE_REQ_WPTR, &wptr)) {
         return FALSE;
     }
-    if (wptr == MAXUINT32) {
+    if (wptr >= 2 * NumEntries) {
         TraceLoggingWrite(g_TtTraceProvider, "ArcQueueGoneWptr");
         return FALSE;
     }
@@ -398,7 +331,7 @@ TtBhArcMsgPush(
         if (!TtBhCsmRead32(Context, QueueBase + TT_ARC_MSG_QUEUE_REQ_RPTR, &rptr)) {
             return FALSE;
         }
-        if (rptr == MAXUINT32) {
+        if (rptr >= 2 * NumEntries) {
             TraceLoggingWrite(g_TtTraceProvider, "ArcQueueGoneRptr");
             return FALSE;
         }
@@ -449,7 +382,7 @@ TtBhArcMsgPop(
     if (!TtBhCsmRead32(Context, QueueBase + TT_ARC_MSG_QUEUE_RES_RPTR, &rptr)) {
         return FALSE;
     }
-    if (rptr == MAXUINT32) {
+    if (rptr >= 2 * NumEntries) {
         TraceLoggingWrite(g_TtTraceProvider, "ArcQueueGoneRptr");
         return FALSE;
     }
@@ -459,7 +392,7 @@ TtBhArcMsgPop(
         if (!TtBhCsmRead32(Context, QueueBase + TT_ARC_MSG_QUEUE_RES_WPTR, &wptr)) {
             return FALSE;
         }
-        if (wptr == MAXUINT32) {
+        if (wptr >= 2 * NumEntries) {
             TraceLoggingWrite(g_TtTraceProvider, "ArcQueueGoneWptr");
             return FALSE;
         }
@@ -511,6 +444,9 @@ TtBhSendArcMessage(
     BOOLEAN ok = FALSE;
 
     WdfWaitLockAcquire(Context->ArcMsgLock, NULL);
+    if (Context->ArcExchangeUncertain) {
+        goto out; // a late reply cannot satisfy a different command (DD-21)
+    }
 
     deadline = TtBhDeadline(TT_ARC_MSG_READY_MS);
     for (;;) {
@@ -533,15 +469,40 @@ TtBhSendArcMessage(
 
     queueCtrlAddr = TtBhNocRead32(Context, TT_BH_ARC_X, TT_BH_ARC_Y,
                                   TT_BH_ARC_MSG_QCB_PTR, 0);
-    if (!TtBhCsmRead32(Context, queueCtrlAddr + 0, &queueBase) ||
+    if (!TtBhCsmRangeValid(queueCtrlAddr, 8) ||
+        !TtBhCsmRead32(Context, queueCtrlAddr + 0, &queueBase) ||
         !TtBhCsmRead32(Context, queueCtrlAddr + 4, &queueInfo)) {
         goto out;
     }
     numEntries = queueInfo & 0xFF;
-    if (numEntries == 0) {
+    if (numEntries == 0 || !TtBhCsmRangeValid(queueBase,
+        TT_ARC_MSG_QUEUE_HEADER_SIZE + 2ull * numEntries * sizeof(TT_ARC_MSG))) {
         goto out;
     }
+    {
+        UINT32 reqRead, reqWrite, resRead, resWrite;
 
+        // One synchronous driver owns this queue. Discard only replies
+        // already present before publication; never drain after a timeout.
+        if (!TtBhCsmRead32(Context, queueBase + TT_ARC_MSG_QUEUE_REQ_RPTR, &reqRead) ||
+            !TtBhCsmRead32(Context, queueBase + TT_ARC_MSG_QUEUE_REQ_WPTR, &reqWrite) ||
+            !TtBhCsmRead32(Context, queueBase + TT_ARC_MSG_QUEUE_RES_RPTR, &resRead) ||
+            !TtBhCsmRead32(Context, queueBase + TT_ARC_MSG_QUEUE_RES_WPTR, &resWrite) ||
+            reqRead >= 2 * numEntries || reqWrite >= 2 * numEntries ||
+            resRead >= 2 * numEntries || resWrite >= 2 * numEntries ||
+            reqRead != reqWrite ||
+            (resWrite + 2 * numEntries - resRead) % (2 * numEntries) > numEntries) {
+            Context->ArcExchangeUncertain = TRUE;
+            goto out;
+        }
+        if (!TtBhCsmWrite32(Context, queueBase + TT_ARC_MSG_QUEUE_RES_RPTR, resWrite)) {
+            goto out;
+        }
+    }
+
+    // Any failure after publication may leave a response in flight. Only a
+    // complete exchange clears this latch; D0 resume must not clear it.
+    Context->ArcExchangeUncertain = TRUE;
     if (!TtBhArcMsgPush(Context, Msg, queueBase, numEntries)) {
         goto out;
     }
@@ -553,6 +514,7 @@ TtBhSendArcMessage(
         goto out;
     }
 
+    Context->ArcExchangeUncertain = FALSE;
     ok = (Msg->Header == 0);   // blackhole.c:539
 
 out:
@@ -575,6 +537,7 @@ TtBhTelemetryProbe(
     UINT32 version, majorVer;
     UINT32 numEntries;
     UINT32 i;
+    UINT64 cache[TT_TELEM_TAG_CACHE_SIZE] = { 0 };
 
     RtlZeroMemory(Context->TelemetryTagCache, sizeof(Context->TelemetryTagCache));
     Context->TelemetryValid = FALSE;
@@ -585,10 +548,8 @@ TtBhTelemetryProbe(
                              TT_BH_ARC_TELEMETRY_DATA, 0);
     tagsAddr = baseAddr + 8;
 
-    if (baseAddr < TT_ARC_CSM_BASE ||
-        baseAddr >= TT_ARC_CSM_BASE + TT_ARC_CSM_SIZE ||
-        dataAddr < TT_ARC_CSM_BASE ||
-        dataAddr >= TT_ARC_CSM_BASE + TT_ARC_CSM_SIZE) {
+    if (!TtBhCsmRangeValid(baseAddr, 8) ||
+        !TtBhCsmRangeValid(dataAddr, sizeof(UINT32))) {
         TraceLoggingWrite(g_TtTraceProvider, "TelemetryNotAvailable");
         return STATUS_DEVICE_NOT_READY;   // -ENODEV parity
     }
@@ -604,90 +565,39 @@ TtBhTelemetryProbe(
     numEntries = TtBhNocRead32(Context, TT_BH_ARC_X, TT_BH_ARC_Y,
                                baseAddr + 4, 0);
 
+    if (numEntries > TT_TELEMETRY_MAX_ENTRIES ||
+        !TtBhCsmRangeValid(tagsAddr, (UINT64)numEntries * sizeof(UINT32))) {
+        return STATUS_DEVICE_DATA_ERROR;
+    }
     for (i = 0; i < numEntries; i++) {
-        UINT32 tagEntry = TtBhNocRead32(Context, TT_BH_ARC_X, TT_BH_ARC_Y,
-                                        tagsAddr + (i * 4), 0);
-        UINT16 tagId = tagEntry & 0xFFFF;
-        UINT16 offset = (tagEntry >> 16) & 0xFFFF;
+        UINT32 tagEntry;
+        UINT16 tagId;
+        UINT64 address;
 
+        if (!TtBhCsmRead32(Context, tagsAddr + (i * 4), &tagEntry) ||
+            tagEntry == MAXUINT32) {
+            return STATUS_DEVICE_DATA_ERROR;
+        }
+        tagId = (UINT16)(tagEntry & 0xFFFF);
+        address = (UINT64)dataAddr + ((UINT64)(tagEntry >> 16) * sizeof(UINT32));
+        if (!TtBhCsmRangeValid(address, sizeof(UINT32))) {
+            return STATUS_DEVICE_DATA_ERROR;
+        }
         if (tagId < TT_TELEM_TAG_CACHE_SIZE) {
-            Context->TelemetryTagCache[tagId] =
-                (UINT64)dataAddr + ((UINT64)offset * 4);
+            cache[tagId] = address;
         }
     }
 
+    RtlCopyMemory(Context->TelemetryTagCache, cache, sizeof(cache));
     Context->TelemetryValid = TRUE;
     TraceLoggingWrite(g_TtTraceProvider, "TelemetryProbed",
                       TraceLoggingUInt32(numEntries, "entries"));
     return STATUS_SUCCESS;
 }
 
-// Reset marker (pcie.c:140-149) and timer interrupt (pcie.c:133-138) via the
-// device's own config space. Local here to keep blackhole_reset self-contained;
-// reset.c has equivalent statics for its own flavors.
-#define TT_PCI_COMMAND 0x04
-#define TT_PCI_COMMAND_PARITY 0x40
-
-static VOID
-TtBhSetResetMarker(
-    _In_ struct _TT_DEVICE_CONTEXT *Context
-    )
-{
-    USHORT command;
-
-    if (TtCfgReadWord(Context, TT_PCI_COMMAND, &command)) {
-        TtCfgWriteWord(Context, TT_PCI_COMMAND,
-                       (USHORT)(command | TT_PCI_COMMAND_PARITY));
-    }
-}
-
-static BOOLEAN
-TtBhTimerInterrupt(
-    _In_ struct _TT_DEVICE_CONTEXT *Context
-    )
-{
-    TtCfgWriteDword(Context, 0x934, 0x1);
-    TtCfgWriteDword(Context, 0x930, 0x11);
-    return TRUE;
-}
-
-// blackhole_reset (blackhole.c:542-570). ASIC_RESET: marker + timer interrupt
-// (config-write trigger). ASIC_DMC_RESET: TEST-then-TRIGGER_RESET via the ARC
-// message queue (payload 3 = ASIC + M3). Called under the reset resource.
-_Use_decl_annotations_
-BOOLEAN
-TtBhReset(
-    struct _TT_DEVICE_CONTEXT *Context,
-    UINT32 Flags
-    )
-{
-    if (Flags == TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET) {
-        TT_ARC_MSG msg;
-
-        // Confirm FW/NOC alive first (blackhole.c:551-555).
-        RtlZeroMemory(&msg, sizeof(msg));
-        msg.Header = TT_ARC_MSG_TYPE_TEST;
-        if (!TtBhSendArcMessage(Context, &msg)) {
-            TraceLoggingWrite(g_TtTraceProvider, "ResetNocHung");
-            return FALSE;
-        }
-
-        TtBhSetResetMarker(Context);
-
-        RtlZeroMemory(&msg, sizeof(msg));
-        msg.Header = TT_ARC_MSG_TYPE_TRIGGER_RESET;
-        msg.Payload[0] = 3;   // ASIC + M3 reset
-        (VOID)TtBhSendArcMessage(Context, &msg);
-        return TRUE;          // "Possibly a lie..." (blackhole.c:562)
-    }
-
-    // ASIC_RESET (blackhole.c:564-567): marker + config-write trigger.
-    TtBhSetResetMarker(Context);
-    return TtBhTimerInterrupt(Context);
-}
-
-// blackhole_init_hardware (blackhole.c:620-639): MRRS, ASIC_STATE0, then
-// SET_WDT_TIMEOUT (tolerated on failure for old FW). Always returns true.
+// blackhole_init_hardware (blackhole.c:620-639): initialize vendor firmware
+// state in D0. A completed watchdog-command refusal supports older firmware;
+// an uncertain exchange prevents hardware admission.
 _Use_decl_annotations_
 BOOLEAN
 TtBhInitHardware(
@@ -696,35 +606,23 @@ TtBhInitHardware(
 {
     TT_ARC_MSG msg;
 
-    // pcie_set_readrq(pdev, MAX_MRRS=4096) (blackhole.c:626): RMW the PCIe
-    // capability Device Control MRRS field. PcieCapOffset comes from
-    // TtPciSaveState; 0 means no PCIe capability (soft device) — skip.
-    if (Context->PcieCapOffset != 0) {
-        USHORT devCtl;
-
-        if (TtCfgReadWord(Context, Context->PcieCapOffset + 0x08, &devCtl) &&
-            devCtl != 0xFFFF) {
-            devCtl = (USHORT)((devCtl & ~TT_PCI_EXP_DEVCTL_READRQ) |
-                              (TT_BH_MAX_MRRS_ENCODING <<
-                               TT_PCI_EXP_DEVCTL_READRQ_SHIFT));
-            TtCfgWriteWord(Context, Context->PcieCapOffset + 0x08, devCtl);
-        }
-    }
-
+    // BME, MRRS and MPS are configured by the Windows PCI/DMA stack.
     RtlZeroMemory(&msg, sizeof(msg));
     msg.Header = TT_ARC_MSG_TYPE_ASIC_STATE0;   // 0xA0
-    (VOID)TtBhSendArcMessage(Context, &msg);
+    if (!TtBhSendArcMessage(Context, &msg)) {
+        return FALSE;
+    }
 
     RtlZeroMemory(&msg, sizeof(msg));
     msg.Header = TT_ARC_MSG_TYPE_SET_WDT_TIMEOUT;   // 0xC1
     // 1000 * auto_reset_timeout ms, Linux default 10 s (module.c:48,
     // blackhole.c:634) — arms the ARC/DMC auto-recovery watchdog. The old
     // payload of 0 came from misreading the module default.
-    msg.Payload[0] = 1000u * TT_AUTO_RESET_TIMEOUT_S;
+    msg.Payload[0] = 10000u;
     (VOID)TtBhSendArcMessage(Context, &msg);
 
     TraceLoggingWrite(g_TtTraceProvider, "BhInitHardware");
-    return TRUE;
+    return !Context->ArcExchangeUncertain;
 }
 
 // blackhole_read_telemetry_tag (blackhole.c:440-453)

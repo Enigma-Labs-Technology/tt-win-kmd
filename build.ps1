@@ -5,9 +5,7 @@
 #   powershell -ExecutionPolicy Bypass -File build.ps1 [-Configuration Release] [-Test] [-Sdv]
 #
 # -Test additionally runs Code Analysis for Drivers with warnings as errors.
-# -Sdv runs Static Driver Verifier (scan + default rule set) on the driver
-#      project after the build and fails on any rule defect. Slow (tens of
-#      minutes); intended before a signing submission, not for every build.
+# -Sdv is retained only to reject obsolete invocations: WDK 26100 has no SDV.
 # From WSL use ./build.sh, which stages the tree to NTFS and calls this script.
 
 [CmdletBinding()]
@@ -20,6 +18,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($Sdv) {
+    throw 'Static Driver Verifier is absent from EWDK 26100. Use -Test for Driver Code Analysis; CodeQL and hardware qualification are separate gates. No SDV analysis was run.'
+}
 
 if (-not (Test-Path $EwdkIso)) {
     throw "EWDK ISO not found at $EwdkIso (see docs/design-decisions.md DD-1)"
@@ -56,32 +58,6 @@ if ($Test) {
 cmd /c "`"$ewdk\BuildEnv\SetupBuildEnv.cmd`" && msbuild $($msbuildArgs -join ' ')"
 if ($LASTEXITCODE -ne 0) {
     throw "Build failed with exit code $LASTEXITCODE"
-}
-
-if ($Sdv) {
-    # Static Driver Verifier: the scan pass discovers the role types, the check
-    # pass runs the default KMDF rule set. Results land under src\driver\sdv\
-    # (SDV-default.xml, smvstats.txt); the DVL is produced for a later WHQL
-    # submission but is not required for attestation signing.
-    cmd /c "`"$ewdk\BuildEnv\SetupBuildEnv.cmd`" && msbuild `"$proj`" /nologo /p:Configuration=$Configuration /p:Platform=x64 /t:sdv /p:Inputs=`"/scan`""
-    if ($LASTEXITCODE -ne 0) {
-        throw "SDV scan failed with exit code $LASTEXITCODE"
-    }
-    cmd /c "`"$ewdk\BuildEnv\SetupBuildEnv.cmd`" && msbuild `"$proj`" /nologo /p:Configuration=$Configuration /p:Platform=x64 /t:sdv /p:Inputs=`"/check:default.sdv`""
-    if ($LASTEXITCODE -ne 0) {
-        throw "SDV check failed with exit code $LASTEXITCODE"
-    }
-    $sdvResult = Join-Path $PSScriptRoot 'src\driver\sdv\SDV-default.xml'
-    if (Test-Path $sdvResult) {
-        $defects = Select-String -Path $sdvResult -Pattern 'Defect' -SimpleMatch
-        if ($defects) {
-            Write-Host "SDV reported defects; see $sdvResult"
-            throw 'Static Driver Verifier found rule violations'
-        }
-        Write-Host "SDV: no defects ($sdvResult)"
-    } else {
-        Write-Warning "SDV result file not found at $sdvResult"
-    }
 }
 
 # User-mode conformance tests (same warnings-as-errors bar).

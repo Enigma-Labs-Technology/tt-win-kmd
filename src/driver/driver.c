@@ -135,15 +135,15 @@ DriverEntry(
         return status;
     }
 
-    // Registration needs the image linked with /INTEGRITYCHECK. A failure is
-    // logged, not fatal: mappings and pins still work, only the safety net
-    // for handles duplicated into other processes is missing (DD-15).
+    // Process-bound mappings require this callback, including when a handle
+    // is duplicated into a process that outlives its creator (DD-19).
     status = PsSetCreateProcessNotifyRoutineEx(TtProcessNotify, FALSE);
     if (NT_SUCCESS(status)) {
         g_TtProcessNotifyRegistered = TRUE;
     } else {
         TraceLoggingWrite(g_TtTraceProvider, "ProcessNotifyRegisterFailed",
                           TraceLoggingNTStatus(status, "status"));
+        return status;
     }
 
     TraceLoggingWrite(g_TtTraceProvider, "DriverLoaded");

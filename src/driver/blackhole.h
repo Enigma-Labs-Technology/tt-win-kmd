@@ -41,6 +41,7 @@
 
 // Telemetry (tt-kmd/telemetry.h)
 #define TT_TELEM_TAG_CACHE_SIZE 128
+#define TT_TELEMETRY_MAX_ENTRIES 4096u // bounded Windows firmware-table walk
 #define TT_TELEMETRY_TIMER_HEARTBEAT 32
 
 // 32-byte fixed message (tt-kmd/msgqueue.h:11-14)
@@ -56,5 +57,3 @@ NTSTATUS TtBhReadTelemetryTag(_In_ struct _TT_DEVICE_CONTEXT *Context,
                               _In_ UINT16 TagId, _Out_ UINT32 *Value);
 BOOLEAN TtBhSendArcMessage(_In_ struct _TT_DEVICE_CONTEXT *Context,
                            _Inout_ PTT_ARC_MSG Msg);
-VOID TtBhSaveResetState(_Inout_ struct _TT_DEVICE_CONTEXT *Context);
-VOID TtBhRestoreResetState(_In_ struct _TT_DEVICE_CONTEXT *Context);

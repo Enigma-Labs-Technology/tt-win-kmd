@@ -58,8 +58,10 @@ TtPowerAggregate(
         UINT8 flagsCount, settingsCount;
         UINT16 unspecifiedMask, effectiveFlags;
 
+        WdfWaitLockAcquire(fc->Lock, NULL);
         // Skip stale-generation handles (chardev.c:493-495) and non-contributors.
         if (!fc->PowerContributes || fc->OpenResetGen != gen) {
+            WdfWaitLockRelease(fc->Lock);
             continue;
         }
 
@@ -83,15 +85,14 @@ TtPowerAggregate(
                 aggSettings[i] = fc->PowerSettings[i];
             }
         }
+        WdfWaitLockRelease(fc->Lock);
     }
 
     WdfWaitLockRelease(Context->FileListLock);
 
-    Context->PowerAggValid = TRUE;
+    Context->PowerAggValid = FALSE;
     Context->PowerAggFlags = aggFlags;
     RtlCopyMemory(Context->PowerAggSettings, aggSettings, sizeof(aggSettings));
-
-    WdfWaitLockRelease(Context->PowerLock);
 
     TraceLoggingWrite(g_TtTraceProvider, "PowerAggregate",
                       TraceLoggingUInt16(aggFlags, "flags"),
@@ -103,7 +104,7 @@ TtPowerAggregate(
     // two u16 per dword. ttsim consumed any layout as a no-op, which hid an
     // earlier mis-pack (validity/flags in payload[0], 12 settings dropped) —
     // real firmware parses these fields.
-    if (Context->IsBlackhole && !Context->Detached) {
+    if (Context->HardwareReady && Context->IsBlackhole && !Context->Detached) {
         RtlZeroMemory(&msg, sizeof(msg));
         msg.Header = TT_ARC_MSG_TYPE_POWER_SETTING |
                      ((UINT32)TT_POWER_VALIDITY(15, maxSettingsCount) << 8) |
@@ -112,8 +113,12 @@ TtPowerAggregate(
             msg.Payload[i] = (UINT32)aggSettings[2 * i] |
                              ((UINT32)aggSettings[2 * i + 1] << 16);
         }
-        (VOID)TtBhSendArcMessage(Context, &msg);
+        Context->PowerAggValid = TtBhSendArcMessage(Context, &msg);
+    } else if (Context->HardwareReady && !Context->IsBlackhole) {
+        Context->PowerAggValid = TRUE;
     }
+    // Serialize snapshot publication through firmware completion.
+    WdfWaitLockRelease(Context->PowerLock);
 }
 
 // ioctl_set_power_state (chardev.c:562-589). argsz protocol (input-only).

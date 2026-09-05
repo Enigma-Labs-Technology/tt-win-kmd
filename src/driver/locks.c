@@ -39,6 +39,7 @@ TtLocksInit(
     // Manual queue holds pended ACQUIRE_BLOCKING requests. WDF makes queued
     // requests cancellable automatically.
     WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
+    queueConfig.PowerManaged = WdfFalse; // software waiters must drain during D0 exit
     WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
     attributes.ParentObject = Context->Device;
     return WdfIoQueueCreate(Context->Device, &queueConfig, &attributes,
@@ -92,34 +93,26 @@ TtLockCompleteAcquired(
     }
 }
 
-// Drain the wait queue and retry each pended waiter. Called under LockLock
-// after any state change that could satisfy or invalidate a waiter (RELEASE,
-// file cleanup, reset gen-bump, surprise removal). Winners complete value=1,
-// stale-gen/detached waiters complete STATUS_DEVICE_REMOVED, losers are
-// re-queued. Requests are drained fully into a local batch first (so a
-// re-queued loser is never reprocessed within a pass). A batch cap bounds the
-// stack array; any overflow simply waits for the next wake (FIFO-fair since
-// re-queued losers go to the tail, behind the not-yet-drained overflow).
-#define TT_LOCK_WAKE_BATCH 64
-
+// Cover the initial queue under LockLock with an initial-count budget.
+// Requeued losers go behind that snapshot; concurrent enqueue takes LockLock.
+// Cancellation may cause a loser to be revisited, but cannot hide an original
+// waiter behind the budget. No stack array or unserviced overflow is needed.
 _Use_decl_annotations_
 VOID
 TtLocksWakeWaiters(
     PTT_DEVICE_CONTEXT Context
     )
 {
-    WDFREQUEST batch[TT_LOCK_WAKE_BATCH];
-    ULONG count = 0;
-    ULONG i;
+    ULONG remaining = 0;
 
-    while (count < TT_LOCK_WAKE_BATCH &&
-           NT_SUCCESS(WdfIoQueueRetrieveNextRequest(Context->LockWaitQueue,
-                                                    &batch[count]))) {
-        count++;
-    }
+    (VOID)WdfIoQueueGetState(Context->LockWaitQueue, &remaining, NULL);
+    while (remaining-- != 0) {
+        WDFREQUEST request;
 
-    for (i = 0; i < count; i++) {
-        WDFREQUEST request = batch[i];
+        if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(Context->LockWaitQueue,
+                                                      &request))) {
+            break;
+        }
         PTT_LOCK_REQUEST_CONTEXT reqContext = TtGetLockRequestContext(request);
         WDFFILEOBJECT fileObject = WdfRequestGetFileObject(request);
         PTT_FILE_CONTEXT fileContext =

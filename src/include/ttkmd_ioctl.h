@@ -32,6 +32,9 @@ DEFINE_GUID(GUID_DEVINTERFACE_TENSTORRENT,
 // IOCTL API version; parity with TENSTORRENT_DRIVER_VERSION (tt-kmd/ioctl.h:10).
 #define TENSTORRENT_DRIVER_VERSION 2
 
+// Windows RESET_PCIE_LINK: submission acknowledged; observe PnP for completion.
+#define TT_RESET_RESULT_PENDING 2u
+
 // Linux ioctl magic (tt-kmd/ioctl.h:12). The shim uses it to decode the
 // TENSTORRENT_IOCTL_* request values tt-umd passes (which are _IO(0xFA, nr)).
 #define TENSTORRENT_IOCTL_MAGIC 0xFA

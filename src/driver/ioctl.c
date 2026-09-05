@@ -223,16 +223,13 @@ TtIoctlQueryMappings(
     return STATUS_SUCCESS;
 }
 
-// Gate order per tt_cdev_ioctl (chardev.c:591-624, analysis §04.2). Nr of
-// MAXUINT32 marks mmap-path callers (MAP/UNMAP): Linux mmap checks detached
-// and reset_gen but NOT needs_hw_init (documented asymmetry, analysis §11).
-// The reset rwsem lands with RESET_DEVICE (M4).
+// Common queue/caller-context admission under ResetResource. A stale file
+// never recovers; a current file may operate only while the device is in D0.
 _Use_decl_annotations_
 NTSTATUS
 TtCheckIoGates(
     PTT_DEVICE_CONTEXT Context,
-    WDFFILEOBJECT FileObject,
-    UINT32 Nr
+    WDFFILEOBJECT FileObject
     )
 {
     if (Context->Detached) {
@@ -243,15 +240,8 @@ TtCheckIoGates(
             ReadAcquire64(&Context->ResetGen)) {
         return STATUS_DEVICE_REMOVED;                 // -ENODEV
     }
-    if (Context->NeedsHwInit && Nr != MAXUINT32 &&
-        Nr != 0 && Nr != 5 && Nr != 6) {
-        // Post-reset window: only GET_DEVICE_INFO, GET_DRIVER_INFO,
-        // RESET_DEVICE are allowed (chardev.c:616-624). QUERY_TELEMETRY maps
-        // Linux's -ENODATA distinction (telemetry.c:23-24) to NOT_READY so a
-        // telemetry poller sees a transient, not device-gone (porting note,
-        // analysis §10:369).
-        return (Nr == 0x102u) ? STATUS_DEVICE_NOT_READY
-                              : STATUS_DEVICE_REMOVED; // -ENODATA / -ENODEV
+    if (!Context->HardwareReady) {
+        return STATUS_DEVICE_NOT_READY;
     }
     return STATUS_SUCCESS;
 }
@@ -397,7 +387,7 @@ TtEvtIoDeviceControl(
         TtResetAcquireShared(context);
     }
 
-    status = TtCheckIoGates(context, fileObject, nr);
+    status = TtCheckIoGates(context, fileObject);
     if (!NT_SUCCESS(status)) {
         goto release;
     }
@@ -497,8 +487,8 @@ release:
 }
 
 // MAP/UNMAP/PIN_PAGES/UNPIN_PAGES must run in the calling process context
-// (MmMapLockedPagesSpecifyCache / MmProbeAndLockPages act on the current
-// process); KMDF queues do not guarantee that, this callback does. All other
+// (user mappings and registered ranges belong to that address space).
+// KMDF queues do not guarantee that, this callback does. All other
 // requests are forwarded to the default queue.
 _Use_decl_annotations_
 VOID
@@ -511,8 +501,14 @@ TtEvtIoInCallerContext(
     WDFFILEOBJECT fileObject = WdfRequestGetFileObject(Request);
     WDF_REQUEST_PARAMETERS params;
     ULONG code;
-    UINT32 gateNr;
     NTSTATUS status;
+
+    // EvtIoInCallerContext is outside the queue execution constraint.
+    // Never take a blocking lock at an elevated caller IRQL.
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_STATE);
+        return;
+    }
 
     WDF_REQUEST_PARAMETERS_INIT(&params);
     WdfRequestGetParameters(Request, &params);
@@ -528,13 +524,10 @@ TtEvtIoInCallerContext(
         goto forward;
     }
 
-    // Pin/unpin are Linux ioctls (full gates incl. needs_hw_init); MAP/UNMAP
-    // follow the mmap gate set (no needs_hw_init check, analysis §11). Held
-    // shared so a concurrent reset (exclusive) drains these first (DD-9).
-    gateNr = (code == IOCTL_TENSTORRENT_PIN_PAGES) ? 7u :
-             (code == IOCTL_TENSTORRENT_UNPIN_PAGES) ? 10u : MAXUINT32;
+    // Caller-context delivery proves process identity, not D0 availability.
+    // Shared acquisition participates in reset/PnP rundown before admission.
     TtResetAcquireShared(context);
-    status = TtCheckIoGates(context, fileObject, gateNr);
+    status = TtCheckIoGates(context, fileObject);
     if (NT_SUCCESS(status) &&
         TtGetFileContext(fileObject)->CreatorProcess != PsGetCurrentProcess()) {
         // DD-15: a handle duplicated or inherited into another process may

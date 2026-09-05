@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
 // Maps to: tt-kmd/enumerate.c (tenstorrent_pci_probe / tenstorrent_pci_remove).
-// M1 scope: device creation, interface publication with per-device reference
-// string, PCI identity capture, BAR inventory by PCI BAR index, and the
-// Blackhole kernel mappings (blackhole.c:587-590). Hardware registers are not
-// touched beyond mapping; a resource-less soft device (ROOT\TTKMD_SOFT) must
-// still start.
+// Device/file contexts, PCI resources and synchronized PnP/D0 admission.
+// Firmware access begins in D0Entry; ReleaseHardware drains all users before
+// unmapping. A resource-less ROOT\TTKMD_SOFT device still serves host tests.
 #include "ttkmd.h"
 
 #include <ntstrsafe.h>
@@ -90,6 +88,8 @@ TtEvtDeviceAdd(
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, TT_DEVICE_CONTEXT);
     attributes.EvtCleanupCallback = TtEvtDeviceContextCleanup;
+    attributes.ExecutionLevel = WdfExecutionLevelPassive;
+    attributes.SynchronizationScope = WdfSynchronizationScopeNone;
 
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
     if (!NT_SUCCESS(status)) {
@@ -151,6 +151,7 @@ TtEvtDeviceAdd(
         WDF_WORKITEM_CONFIG workItemConfig;
 
         WDF_WORKITEM_CONFIG_INIT(&workItemConfig, TtPldrWorkItem);
+        workItemConfig.AutomaticSerialization = FALSE;
         WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
         attributes.ParentObject = device;
         status = WdfWorkItemCreate(&workItemConfig, &attributes,
@@ -213,9 +214,14 @@ TtEvtDeviceFileCreate(
     PTT_FILE_CONTEXT fileContext = TtGetFileContext(FileObject);
     NTSTATUS status;
 
-    // Latch the reset generation (chardev.c:812 parity). Linux open() does not
-    // check detached (analysis §03 open question) — a create during removal
-    // succeeds and every subsequent operation fails; we mirror that.
+    TtResetAcquireShared(context);
+    if (!context->HardwareReady || context->Detached) {
+        TtResetRelease(context);
+        WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
+        return;
+    }
+
+    // Publish only a handle from the currently admitted hardware generation.
     fileContext->OpenResetGen = ReadAcquire64(&context->ResetGen);
 
     // DD-15: the opener owns this handle's user mappings and pins. Create
@@ -243,6 +249,7 @@ TtEvtDeviceFileCreate(
         TtPowerAggregate(context);
     }
 
+    TtResetRelease(context);
     TraceLoggingWrite(g_TtTraceProvider, "FileCreate",
                       TraceLoggingNTStatus(status, "status"));
     WdfRequestComplete(Request, status);
@@ -262,10 +269,10 @@ TtEvtFileCleanup(
     // (release takes reset_rwsem shared, chardev.c:929).
     TtResetAcquireShared(context);
 
-    // NOC cleanup write (tt_cdev_release_noc_cleanup, chardev.c:865-875):
-    // skipped only when detached (hardware gone).
+    // Cleanup writes require live hardware and a current-generation owner.
     if (fileContext->NocCleanupEnabled && !context->Detached &&
-        context->IsBlackhole) {
+        context->HardwareReady && context->IsBlackhole &&
+        fileContext->OpenResetGen == ReadAcquire64(&context->ResetGen)) {
         TtBhNocWrite(context, fileContext->NocCleanupX, fileContext->NocCleanupY,
                      fileContext->NocCleanupAddr,
                      (UINT32)(fileContext->NocCleanupData & 0xFFFFFFFF),
@@ -276,22 +283,18 @@ TtEvtFileCleanup(
     // (chardev.c:877-885). Before delisting so waiter gen checks are correct.
     TtLocksReleaseAll(context, FileObject);
 
+    // Remain visible to process exit until every process-bound resource is
+    // destroyed. The callback takes this same lock before the file lock.
+    WdfWaitLockAcquire(context->FileListLock, NULL);
+    TtMemoryFileCleanup(context, FileObject);
     if (fileContext->OnDeviceList) {
-        WdfWaitLockAcquire(context->FileListLock, NULL);
         RemoveEntryList(&fileContext->DeviceLink);
         fileContext->OnDeviceList = FALSE;
-        WdfWaitLockRelease(context->FileListLock);
     }
+    WdfWaitLockRelease(context->FileListLock);
 
-    TtMemoryFileCleanup(context, FileObject);
-
+    TtPowerAggregate(context);
     TtResetRelease(context);
-
-    // Re-aggregate power now this handle no longer contributes (chardev.c:938).
-    if (fileContext->PowerContributes) {
-        fileContext->PowerContributes = FALSE;
-        TtPowerAggregate(context);
-    }
 
     // Delisted above, so the process-exit callback can no longer reach this
     // handle; the creator reference can go.
@@ -468,12 +471,13 @@ TtEvtDevicePrepareHardware(
     ULONG i;
     NTSTATUS status;
 
+    TtResetAcquireExclusive(context);
     RtlZeroMemory(context->BarLength, sizeof(context->BarLength));
     RtlZeroMemory(context->BarBase, sizeof(context->BarBase));
     RtlZeroMemory(barValue, sizeof(barValue));
 
     // PCI identity + config access via the bus interface. Kept referenced for
-    // the driver lifetime (reset primitives use it); released in ReleaseHardware.
+    // PrepareHardware..ReleaseHardware interval; config space is read-only here.
     // Absent on the ROOT-enumerated soft device.
     status = WdfFdoQueryForInterface(Device, &GUID_BUS_INTERFACE_STANDARD,
                                      (PINTERFACE)&busIf, sizeof(busIf), 1,
@@ -513,22 +517,7 @@ TtEvtDevicePrepareHardware(
             context->PciDomain = TtQueryPciSegment(Device);
         }
 
-        // pci_set_master parity (enumerate.c:352): ensure Bus Master Enable.
-        // The QEMU rig performed DMA regardless of BME, so the bit was never
-        // load-bearing before silicon.
-        {
-            USHORT command = 0;
-
-            if (busIf.GetBusData(busIf.Context, PCI_WHICHSPACE_CONFIG,
-                                 &command, 0x04,
-                                 sizeof(command)) == sizeof(command) &&
-                command != 0xFFFF && (command & 0x0004) == 0) {
-                command |= 0x0004;
-                busIf.SetBusData(busIf.Context, PCI_WHICHSPACE_CONFIG,
-                                 &command, 0x04, sizeof(command));
-                TraceLoggingWrite(g_TtTraceProvider, "BusMasterEnabled");
-            }
-        }
+        // PCI command/capability registers belong to pci.sys.
 
         // OQ-4/DD-11: pci.sys device-reset interface for RESET_PCIE_LINK.
         // Absence is tolerated; the reset flavor then fails honestly.
@@ -584,6 +573,7 @@ TtEvtDevicePrepareHardware(
         status = TtMapBlackholeBars(context);
         if (!NT_SUCCESS(status)) {
             TtUnmapBlackholeBars(context);
+            TtResetRelease(context);
             return status;
         }
 
@@ -613,55 +603,10 @@ TtEvtDevicePrepareHardware(
             }
         }
 
-        // DD-8: PIN_PAGES hands raw physical addresses to the iATU, which is
-        // only valid in an identity (untranslated) DMA domain. Probe once: a
-        // common buffer's device-logical address must equal its CPU physical
-        // address, and sit within the engine's 58-bit reach.
-        context->DmaIdentityKnown = FALSE;
-        context->DmaIdentityMapped = FALSE;
-        if (context->DmaEnabler != NULL) {
-            WDFCOMMONBUFFER probe = NULL;
+        context->HardwarePrepared = TRUE;
+        // Firmware access is deferred until D0Entry; PrepareHardware is
+        // responsible only for resource discovery and kernel mappings.
 
-            if (NT_SUCCESS(WdfCommonBufferCreate(context->DmaEnabler,
-                                                 PAGE_SIZE,
-                                                 WDF_NO_OBJECT_ATTRIBUTES,
-                                                 &probe))) {
-                PHYSICAL_ADDRESS logical =
-                    WdfCommonBufferGetAlignedLogicalAddress(probe);
-                PHYSICAL_ADDRESS physical = MmGetPhysicalAddress(
-                    WdfCommonBufferGetAlignedVirtualAddress(probe));
-
-                context->DmaIdentityKnown = TRUE;
-                context->DmaIdentityMapped =
-                    (logical.QuadPart == physical.QuadPart) &&
-                    ((UINT64)logical.QuadPart <= TT_BH_NOC_DMA_LIMIT);
-                TraceLoggingWrite(g_TtTraceProvider, "DmaIdentityProbe",
-                                  TraceLoggingBoolean(context->DmaIdentityMapped, "identity"),
-                                  TraceLoggingUInt64((UINT64)logical.QuadPart, "logical"),
-                                  TraceLoggingUInt64((UINT64)physical.QuadPart, "physical"));
-                WdfObjectDelete(probe);
-            }
-        }
-
-        // Probe-order parity (enumerate.c:370-373): init_hardware, then
-        // pci_save_state + save_reset_state — the snapshot must carry the
-        // MRRS that init just programmed. The PCIe cap offset must be
-        // discovered FIRST: init_hardware's MRRS write needs it (Linux has
-        // pdev->pcie_cap from kernel probe). On the rig ARC was the ttsim
-        // stub; on silicon this is the driver's first real firmware contact.
-        TtDiscoverPcieCap(context);
-        context->NeedsHwInit = !TtBhInitHardware(context);
-        TtPciSaveState(context);
-        TtBhSaveResetState(context);
-        context->HardwareInitDone = TRUE;
-
-        // Telemetry probe is non-fatal, like Linux blackhole_init_hardware:
-        // a device without telemetry still enumerates (blackhole.c:652-653).
-        (VOID)TtBhTelemetryProbe(context);
-
-        // Initial aggregated power state (power_policy parity,
-        // enumerate.c:388-389): no open handles yet -> the idle default.
-        TtPowerAggregate(context);
     }
 
     TraceLoggingWrite(g_TtTraceProvider, "PrepareHardware",
@@ -670,6 +615,7 @@ TtEvtDevicePrepareHardware(
                       TraceLoggingUInt16(context->BusDevFn, "busDevFn"));
 
     // busIf reference is retained in context (released in ReleaseHardware).
+    TtResetRelease(context);
     return STATUS_SUCCESS;
 }
 
@@ -684,15 +630,15 @@ TtEvtDeviceReleaseHardware(
 
     UNREFERENCED_PARAMETER(ResourcesTranslated);
 
+    TtResetAcquireExclusive(context);
+    // D0Exit normally did this already. Also cover partial start failures.
+    TtInvalidateFiles(context, NULL);
+    context->HardwareReady = FALSE;
+    context->HardwarePrepared = FALSE;
+    context->TelemetryValid = FALSE;
     TtUnmapBlackholeBars(context);
     RtlZeroMemory(context->BarLength, sizeof(context->BarLength));
     RtlZeroMemory(context->BarBase, sizeof(context->BarBase));
-
-    context->SavedStateValid = FALSE;
-    context->SavedMpsValid = FALSE;
-    context->HardwareInitDone = FALSE;
-    context->DmaIdentityKnown = FALSE;
-    context->DmaIdentityMapped = FALSE;
 
     if (context->ResetInterfaceValid) {
         if (context->ResetInterface.InterfaceDereference != NULL) {
@@ -709,13 +655,12 @@ TtEvtDeviceReleaseHardware(
     }
 
     TraceLoggingWrite(g_TtTraceProvider, "ReleaseHardware");
+    TtResetRelease(context);
     return STATUS_SUCCESS;
 }
 
-// Suspend/resume parity (enumerate.c:499-522): resume re-runs init_hardware
-// and re-saves config ("Suspend invalidates the saved state"); suspend drops
-// the ASIC to A3 via cleanup_hardware (blackhole.c:702-707). Neither bumps
-// ResetGen — handles survive suspend, like Linux.
+// All hardware admission and release share ResetResource. Existing MMIO
+// views cannot safely survive power loss: invalidate handles before D0 exit.
 _Use_decl_annotations_
 NTSTATUS
 TtEvtDeviceD0Entry(
@@ -724,16 +669,30 @@ TtEvtDeviceD0Entry(
     )
 {
     PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
+    NTSTATUS status = STATUS_SUCCESS;
 
-    // Initial start does its init in PrepareHardware (which runs first and
-    // sets HardwareInitDone); only a return from a low-power state
-    // re-initializes here.
-    if (context->IsBlackhole && context->HardwareInitDone &&
-        PreviousState != WdfPowerDeviceD3Final) {
-        (VOID)TtBhInitHardware(context);
-        TtPciSaveState(context);
+    UNREFERENCED_PARAMETER(PreviousState);
+    TtResetAcquireExclusive(context);
+    if (context->Detached || context->PldrQueued != 0 ||
+        (context->IsBlackhole && !context->HardwarePrepared)) {
+        status = STATUS_DEVICE_NOT_READY;
+    } else if (context->IsBlackhole) {
+        if (!TtBhInitHardware(context)) {
+            status = STATUS_DEVICE_NOT_READY;
+        } else {
+            (VOID)TtBhTelemetryProbe(context);
+        }
     }
-    return STATUS_SUCCESS;
+    context->HardwareReady = NT_SUCCESS(status);
+    if (context->HardwareReady) {
+        TtPowerAggregate(context);
+        if (context->IsBlackhole && !context->PowerAggValid) {
+            context->HardwareReady = FALSE;
+            status = STATUS_DEVICE_NOT_READY;
+        }
+    }
+    TtResetRelease(context);
+    return status;
 }
 
 _Use_decl_annotations_
@@ -745,17 +704,24 @@ TtEvtDeviceD0Exit(
 {
     PTT_DEVICE_CONTEXT context = TtGetDeviceContext(Device);
 
-    // blackhole_cleanup_hardware (blackhole.c:702-707): ASIC_STATE3 on the
-    // way down, skipped when detached (surprise removal — the send would
-    // just time out against a missing device anyway).
-    if (context->IsBlackhole && !context->Detached &&
-        TargetState != WdfPowerDeviceD0) {
+    UNREFERENCED_PARAMETER(TargetState);
+    TtResetAcquireExclusive(context);
+    // Exclusive acquisition drains caller-context operations as well as
+    // file callbacks. Revoke views and disable owned DMA while still in D0.
+    TtInvalidateFiles(context, NULL);
+    if (context->IsBlackhole && context->HardwareReady && !context->Detached) {
         TT_ARC_MSG msg;
 
         RtlZeroMemory(&msg, sizeof(msg));
         msg.Header = TT_ARC_MSG_TYPE_ASIC_STATE3;
         (VOID)TtBhSendArcMessage(context, &msg);
     }
+    context->HardwareReady = FALSE;
+    context->TelemetryValid = FALSE;
+    WdfWaitLockAcquire(context->PowerLock, NULL);
+    context->PowerAggValid = FALSE;
+    WdfWaitLockRelease(context->PowerLock);
+    TtResetRelease(context);
     return STATUS_SUCCESS;
 }
 
@@ -772,14 +738,9 @@ TtEvtDeviceSurpriseRemoval(
     // dangle. Under the reset resource exclusive for a stable snapshot.
     TtResetAcquireExclusive(context);
     context->Detached = TRUE;
-    TtResetZapMappings(context);
+    context->HardwareReady = FALSE;
+    TtInvalidateFiles(context, NULL);
     TtResetRelease(context);
-
-    // Wake blocking lock waiters so they observe detached and fail -ENODEV
-    // (enumerate.c:461-463 parity).
-    WdfWaitLockAcquire(context->LockLock, NULL);
-    TtLocksWakeWaiters(context);
-    WdfWaitLockRelease(context->LockLock);
 
     TraceLoggingWrite(g_TtTraceProvider, "SurpriseRemoval");
 }
